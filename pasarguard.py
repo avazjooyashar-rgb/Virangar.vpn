@@ -1,95 +1,156 @@
 # ============================================================
 # pasarguard.py
-# اتصال به پنل PasarGuard (تست اتصال / ساخت سرویس) +
-# ثبت سرویس ساخته‌شده در دیتابیس داخلی
+# اتصال واقعی به پنل PasarGuard با استفاده از SDK رسمی
+# پکیج پایتون: pip install pasarguard   (https://pypi.org/project/pasarguard/)
+# ============================================================
+#
+# نکات مهم:
+# 1) یوزر/پسوردی که موقع افزودن پنل وارد می‌کنید باید مربوط به
+#    یک ادمین «sudo» در پنل PasarGuard باشد، نه یک اپراتور محدود؛
+#    چون برای اضافه‌کردن کاربر به همه‌ی گروه‌ها به دسترسی کامل نیاز است.
+# 2) کاربر تازه‌ساخته‌شده با create_user_in_all_groups به تمام
+#    گروه‌ها (و در نتیجه هاست‌هایی که روی پنل تعریف کرده‌اید) اضافه می‌شود.
+# 3) اگر ارتباط SSL پنل گواهی معتبر ندارد (self-signed)، مقدار
+#    VERIFY_SSL را در همین فایل False کنید.
 # ============================================================
 
-from datetime import datetime, timedelta
+import asyncio
 
-import requests
+from pasarguard import PasarguardAPI, Tools, UserCreate, UserStatus
 
-from db import db_execute, now
 
+VERIFY_SSL = True
+REQUEST_TIMEOUT = 20.0
+
+
+def _normalize_url(url):
+    url = (url or "").strip().rstrip("/")
+
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    return url
+
+
+def _panel_credentials_ok(panel):
+    return bool(
+        (panel.get("url") or "").strip()
+        and (panel.get("username") or "").strip()
+        and (panel.get("password") or "").strip()
+    )
+
+
+# ============================================================
+# ASYNC CORE
+# ============================================================
+
+async def _test_panel_async(panel):
+    base_url = _normalize_url(panel["url"])
+
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+
+        admin = await api.get_current_admin(token=token.access_token)
+
+        return {
+            "success": True,
+            "error": "",
+            "is_sudo": bool(getattr(admin, "is_sudo", False)),
+            "admin_username": getattr(admin, "username", ""),
+        }
+
+
+async def _create_service_async(panel, telegram_user, plan):
+    base_url = _normalize_url(panel["url"])
+
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+
+        username = Tools.random_username(
+            prefix=f"tg{telegram_user['telegram_id']}"
+        )
+
+        user_create = UserCreate(
+            username=username,
+            data_limit=Tools.gb(int(plan["volume"])),
+            expire=Tools.days(int(plan["duration"])),
+            status=UserStatus.ACTIVE,
+            note=(
+                f"VirangarVPN | tg:{telegram_user['telegram_id']} | "
+                f"plan:{plan.get('name', '---')}"
+            ),
+        )
+
+        user = await api.create_user_in_all_groups(
+            user_create,
+            token=token.access_token,
+        )
+
+        return {
+            "success": True,
+            "error": "",
+            "username": user.username,
+            "config": getattr(user, "subscription_url", "") or "",
+            "qr": "",
+        }
+
+
+# ============================================================
+# SYNC WRAPPERS (used by the rest of the bot)
+# ============================================================
 
 def pasarguard_test_panel(panel):
     """
-    این قسمت عمداً endpoint جعلی ندارد.
-    چون endpoint و authentication دقیق PasarGuard
-    باید مطابق نسخه/API واقعی پنل تنظیم شود.
+    تست واقعی اتصال: گرفتن توکن ادمین از پنل و خواندن اطلاعات
+    ادمین لاگین‌شده. برخلاف نسخه قبلی، این فقط ping ساده نیست.
     """
 
-    url = (panel["url"] or "").rstrip("/")
-
-    if not url:
-        return {"success": False, "error": "Panel URL is empty"}
+    if not _panel_credentials_ok(panel):
+        return {
+            "success": False,
+            "error": "آدرس/یوزرنیم/پسورد پنل کامل نیست."
+        }
 
     try:
-        response = requests.get(url, timeout=8, verify=False)
-
-        if response.status_code < 500:
-            return {"success": True, "error": ""}
-
-        return {"success": False, "error": f"HTTP {response.status_code}"}
+        return asyncio.run(_test_panel_async(panel))
 
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 def pasarguard_create_service(panel, telegram_user, plan):
     """
-    مهم: این تابع محل اتصال واقعی به PasarGuard است.
-    endpoint ساخت کاربر/سرویس در نسخه‌های مختلف می‌تواند متفاوت باشد.
-    تا API واقعی پنل مشخص نباشد، کانفیگ ساختگی تولید نمی‌کنیم.
+    ساخت واقعی کاربر روی پنل PasarGuard و دریافت لینک اشتراک (subscription).
     """
 
-    return {
-        "success": False,
-        "error": (
-            "PasarGuard API endpoint for service creation "
-            "is not configured."
-        )
-    }
+    if not _panel_credentials_ok(panel):
+        return {
+            "success": False,
+            "error": "اطلاعات اتصال پنل (URL/Username/Password) کامل نیست."
+        }
 
+    try:
+        return asyncio.run(_create_service_async(panel, telegram_user, plan))
 
-def create_local_service(user, plan, panel, result):
-    config = result.get("config", "")
-    qr = result.get("qr", "")
-
-    expires = (
-        datetime.utcnow() + timedelta(days=int(plan["duration"]))
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    username = result.get("username", f"tg_{user['telegram_id']}")
-
-    db_execute("""
-    INSERT INTO services
-    (user_id, plan_id, panel_id,
-     username, config, qr,
-     volume, used_volume,
-     duration, devices,
-     expires_at, status,
-     created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'active', ?, ?)
-    """, (
-        user["id"],
-        plan["id"],
-        panel["id"],
-        username,
-        config,
-        qr,
-        plan["volume"],
-        plan["duration"],
-        plan["devices"],
-        expires,
-        now(),
-        now()
-    ))
-
-    service = db_execute("""
-    SELECT * FROM services
-    WHERE user_id=?
-    ORDER BY id DESC
-    LIMIT 1
-    """, (user["id"],), fetchone=True)
-
-    return service
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
