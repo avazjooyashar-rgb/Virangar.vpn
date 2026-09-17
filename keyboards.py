@@ -1,11 +1,11 @@
 # ============================================================
 # keyboards.py
-# کیبوردهای اصلی کاربر و مدیر + کیبورد لیست پلن‌ها
+# کیبوردهای Reply و Inline مشترک
 # ============================================================
 
 from telebot import types
 
-from db import db_execute
+from database import get_setting
 
 
 def user_keyboard():
@@ -38,21 +38,24 @@ def admin_keyboard():
     return kb
 
 
-def plans_keyboard():
-    plans = db_execute("""
-    SELECT * FROM plans
-    WHERE active=1
-    ORDER BY sort_order, id
-    """, fetchall=True)
+def force_join_markup():
+    markup = types.InlineKeyboardMarkup()
 
-    kb = types.InlineKeyboardMarkup()
+    url = get_setting("force_join_url", "").strip()
 
-    for plan in plans:
-        kb.add(
+    if url:
+        markup.add(
             types.InlineKeyboardButton(
-                f"💎 {plan['name']} | {plan['price']:,} تومان",
-                callback_data=f"plan:{plan['id']}"
+                "📢 عضویت در کانال",
+                url=url
             )
         )
 
-    return kb
+    markup.add(
+        types.InlineKeyboardButton(
+            "✅ بررسی عضویت",
+            callback_data="check_join"
+        )
+    )
+
+    return markup
