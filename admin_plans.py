@@ -3,6 +3,8 @@
 # مدیریت کامل پلن‌های VPN توسط ادمین / سوپر ادمین
 # ============================================================
 
+import traceback
+
 from telebot import types
 
 from config import bot
@@ -29,6 +31,14 @@ def get_state(user_id):
 
 def clear_state(user_id):
     PLAN_CREATION.pop(user_id, None)
+
+
+def is_editing(state):
+    """
+    True اگر داریم یک فیلد از یک پلنِ از قبل موجود را ویرایش می‌کنیم
+    (نه اینکه در حال ساخت پلن جدید هستیم).
+    """
+    return bool(state.get("data", {}).get("editing_plan_id"))
 
 
 # ============================================================
@@ -112,29 +122,55 @@ def admin_plans(message):
 @bot.callback_query_handler(func=lambda call: call.data == "plan_admin_add")
 def plan_admin_add(call):
 
+    # FIX: همیشه اول از همه جواب کال‌بک رو بده، وگرنه دکمه توی تلگرام
+    # چند ثانیه در حالت "loading" می‌مونه و ساکت می‌میره (دقیقاً همون
+    # چیزی که به نظر می‌رسید "هیچ اتفاقی نمی‌افته")
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
+    # FIX: به‌جای return ساکت، اگه ادمین نبود بهش بگو چرا.
+    # اگه بعد از این پچ همین پیام رو دیدی، یعنی مشکل دقیقاً از
+    # تابع is_admin() یا از عدد chat_id/user_id ذخیره‌شده تو دیتابیسه.
     if not is_admin(call.from_user.id):
+        bot.send_message(
+            call.message.chat.id,
+            "⛔️ دسترسی رد شد: is_admin() برای user_id "
+            f"<code>{call.from_user.id}</code> مقدار False برگردوند."
+        )
         return
 
-    user_id = call.from_user.id
+    try:
+        user_id = call.from_user.id
 
-    clear_state(user_id)
+        clear_state(user_id)
 
-    PLAN_CREATION[user_id] = {
-        "step": "name",
-        "data": {}
-    }
+        PLAN_CREATION[user_id] = {
+            "step": "name",
+            "data": {}
+        }
 
-    bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            "➕ <b>افزودن پلن جدید</b>\n\n"
+            "🏷 نام پلن را وارد کنید:\n\n"
+            "مثال:\n"
+            "<code>آلمان ویژه 100GB</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML"
+        )
 
-    bot.send_message(
-        call.message.chat.id,
-        "➕ <b>افزودن پلن جدید</b>\n\n"
-        "🏷 نام پلن را وارد کنید:\n\n"
-        "مثال:\n"
-        "<code>آلمان ویژه 100GB</code>",
-        reply_markup=back_keyboard(),
-        parse_mode="HTML"
-    )
+    except Exception:
+        # FIX: هر خطای دیگه‌ای (دیتابیس، تلگرام و ...) رو نشون بده
+        # به‌جای اینکه فقط تو کنسول/لاگ سرور گم بشه.
+        err = traceback.format_exc()
+        bot.send_message(
+            call.message.chat.id,
+            "❌ خطا در شروع افزودن پلن:\n\n"
+            f"<code>{err[-3500:]}</code>",
+            parse_mode="HTML"
+        )
 
 
 # ============================================================
@@ -160,6 +196,7 @@ def plan_creation_handler(message):
 
     step = state["step"]
     value = (message.text or "").strip()
+    editing = is_editing(state)
 
     # --------------------------------------------------------
     # NAME
@@ -177,6 +214,15 @@ def plan_creation_handler(message):
             return
 
         state["data"]["name"] = value
+
+        # FIX: اگر داریم فقط یک فیلد از پلن موجود را اصلاح می‌کنیم،
+        # باید برگردیم به منوی ویرایش، نه اینکه کل ویزارد ساخت پلن
+        # از سر گرفته شود.
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "description"
 
         bot.send_message(
@@ -197,6 +243,12 @@ def plan_creation_handler(message):
             value = ""
 
         state["data"]["description"] = value
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "panel"
 
         show_panel_selection(message.chat.id)
@@ -228,6 +280,12 @@ def plan_creation_handler(message):
             return
 
         state["data"]["volume"] = volume
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "duration"
 
         bot.send_message(
@@ -265,6 +323,12 @@ def plan_creation_handler(message):
             return
 
         state["data"]["duration"] = duration
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "devices"
 
         bot.send_message(
@@ -302,6 +366,12 @@ def plan_creation_handler(message):
             return
 
         state["data"]["devices"] = devices
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "price"
 
         bot.send_message(
@@ -339,6 +409,12 @@ def plan_creation_handler(message):
             return
 
         state["data"]["price"] = price
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "reseller_price"
 
         bot.send_message(
@@ -375,6 +451,12 @@ def plan_creation_handler(message):
             return
 
         state["data"]["reseller_price"] = reseller_price
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "location"
 
         bot.send_message(
@@ -396,6 +478,12 @@ def plan_creation_handler(message):
             value = ""
 
         state["data"]["location"] = value
+
+        if editing:
+            state["step"] = "edit_menu"
+            show_edit_menu(message.chat.id, user_id)
+            return
+
         state["step"] = "preview"
 
         send_plan_preview(message.chat.id, user_id)
@@ -516,9 +604,17 @@ def plan_panel_selected(call):
 
     state["data"]["panel_id"] = panel_id
     state["data"]["panel_name"] = panel["name"]
-    state["step"] = "volume"
 
     bot.answer_callback_query(call.id)
+
+    # FIX: همین باگ اینجا هم بود -> اگر در حال ویرایش تک‌فیلدیِ
+    # یک پلن موجود هستیم، برگرد به منوی ویرایش، نه مرحله‌ی حجم.
+    if is_editing(state):
+        state["step"] = "edit_menu"
+        show_edit_menu(call.message.chat.id, user_id)
+        return
+
+    state["step"] = "volume"
 
     bot.send_message(
         call.message.chat.id,
@@ -753,12 +849,24 @@ def show_edit_menu(chat_id, user_id):
             )
         )
 
+    # FIX: اگر داریم یک پلن از قبل موجود را ویرایش می‌کنیم، باید
+    # دکمه‌ی «ذخیره تغییرات» (plan_save_edit) هم باشد، وگرنه هیچ راهی
+    # برای واقعاً ذخیره کردن ویرایش‌ها در دیتابیس وجود ندارد.
     kb.add(
         types.InlineKeyboardButton(
             "👀 پیش‌نمایش",
             callback_data="plan_edit_preview"
         )
     )
+
+    state = PLAN_CREATION.get(user_id, {})
+    if is_editing(state):
+        kb.add(
+            types.InlineKeyboardButton(
+                "💾 ذخیره تغییرات",
+                callback_data="plan_save_edit"
+            )
+        )
 
     kb.add(
         types.InlineKeyboardButton(
