@@ -12,6 +12,17 @@ from database import db_execute, get_setting, now
 from models import get_user, is_admin, internal_user_id
 
 
+def is_support_staff(tg_id):
+    """
+    هم ادمین‌های ثبت‌شده در جدول admins، هم SUPER_ADMIN_ID
+    (که ممکن است در آن جدول ثبت نشده باشد) دسترسی مدیریت
+    پشتیبانی دارند.
+    """
+    if SUPER_ADMIN_ID and str(tg_id) == str(SUPER_ADMIN_ID):
+        return True
+    return is_admin(tg_id)
+
+
 STATUS_LABELS = {
     "open": "🟢 باز (منتظر پاسخ)",
     "answered": "💬 پاسخ داده‌شده",
@@ -75,7 +86,7 @@ def render(chat_id, text, kb, message_id=None):
 # ============  USER SIDE  ===================================
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and not is_admin(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and not is_support_staff(m.from_user.id))
 def user_support_entry(message):
     render_user_menu(message.chat.id)
 
@@ -317,7 +328,7 @@ def user_reply_save(message, ticket_id):
 # ============  ADMIN SIDE  ===================================
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and is_admin(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and is_support_staff(m.from_user.id))
 def admin_support_entry(message):
     render_admin_menu(message.chat.id)
 
@@ -336,7 +347,7 @@ def render_admin_menu(chat_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data == "asup:menu")
 def asup_menu_cb(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     render_admin_menu(call.message.chat.id, call.message.message_id)
@@ -344,7 +355,7 @@ def asup_menu_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:list:"))
 def asup_list(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
 
     scope = call.data.split(":")[2]
@@ -382,7 +393,7 @@ def render_admin_ticket_list(scope, chat_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:view:"))
 def asup_view(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
 
     ticket_id = int(call.data.split(":")[2])
@@ -427,7 +438,7 @@ def render_admin_ticket_view(ticket_id, chat_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:reply:"))
 def asup_reply_start(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
 
     ticket_id = int(call.data.split(":")[2])
@@ -491,7 +502,7 @@ def admin_reply_save(message, ticket_id):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:close:"))
 def asup_close(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
 
     ticket_id = int(call.data.split(":")[2])
@@ -511,7 +522,7 @@ def asup_close(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:reopen:"))
 def asup_reopen(call):
-    if not is_admin(call.from_user.id):
+    if not is_support_staff(call.from_user.id):
         return
 
     ticket_id = int(call.data.split(":")[2])
