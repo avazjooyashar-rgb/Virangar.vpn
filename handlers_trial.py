@@ -1,14 +1,75 @@
 # ============================================================
 # handlers_trial.py
-# تست رایگان برای کاربران عادی
+# تست رایگان برای کاربران عادی + پنل مدیریت کامل برای ادمین
 # ============================================================
 
+import re
+
+from telebot import types
+
 from config import bot
-from database import db_execute, get_setting
+from database import db_execute, get_setting, set_setting, now
 from models import get_user, is_admin
 from pasarguard import pasarguard_create_service
 from services import create_local_service
 
+
+USERNAME_PREFIX = "virangarvpn."
+NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,20}$")
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def count_user_trials(user_id):
+    row = db_execute("""
+    SELECT COUNT(*) c FROM services
+    WHERE user_id=? AND plan_id IS NULL
+    """, (user_id,), fetchone=True)
+
+    return row["c"] if row else 0
+
+
+def username_taken(username):
+    row = db_execute("""
+    SELECT id FROM services
+    WHERE username=?
+    LIMIT 1
+    """, (username,), fetchone=True)
+
+    return bool(row)
+
+
+def get_trial_panel():
+    """
+    اگر ادمین یک پنل مشخص برای تست رایگان انتخاب کرده باشد همان
+    برگردانده می‌شود، در غیر این صورت مثل قبل به‌صورت خودکار
+    پنلی با کمترین assigned_sales انتخاب می‌شود.
+    """
+
+    panel_id = get_setting("trial_panel_id", "")
+
+    if panel_id:
+        panel = db_execute("""
+        SELECT * FROM panels
+        WHERE id=? AND active=1
+        """, (panel_id,), fetchone=True)
+
+        if panel:
+            return panel
+
+    return db_execute("""
+    SELECT * FROM panels
+    WHERE active=1
+    ORDER BY assigned_sales ASC, id ASC
+    LIMIT 1
+    """, fetchone=True)
+
+
+# ============================================================
+# USER FLOW — STEP 1: START
+# ============================================================
 
 @bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان" and not is_admin(m.from_user.id))
 def free_trial(message):
@@ -18,30 +79,119 @@ def free_trial(message):
         bot.send_message(message.chat.id, "❌ تست رایگان غیرفعال است.")
         return
 
-    existing = db_execute("""
-    SELECT id FROM services
-    WHERE user_id=? AND plan_id IS NULL
-    LIMIT 1
-    """, (user["id"],), fetchone=True)
+    limit = int(get_setting("trial_limit", "1"))
+    used = count_user_trials(user["id"])
 
-    if existing:
+    if used >= limit:
         bot.send_message(message.chat.id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.")
+        return
+
+    msg = bot.send_message(
+        message.chat.id,
+        "🎁 <b>تست رایگان</b>\n\n"
+        "برای فعال‌سازی، اول یک نام دلخواه انتخاب کن (فقط حروف/عدد انگلیسی، بدون فاصله):\n\n"
+        "مثال: <code>ali</code>"
+    )
+    bot.register_next_step_handler(msg, trial_get_name)
+
+
+# ============================================================
+# USER FLOW — STEP 2: GET NAME
+# ============================================================
+
+def trial_get_name(message):
+    raw = (message.text or "").strip()
+
+    if not NAME_PATTERN.match(raw):
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ نام نامعتبر است.\n\n"
+            "فقط حروف انگلیسی، عدد و آندرلاین مجاز است (بین ۲ تا ۲۰ کاراکتر).\n"
+            "دوباره یک نام ارسال کن:"
+        )
+        bot.register_next_step_handler(msg, trial_get_name)
+        return
+
+    name = raw.lower()
+    username = f"{USERNAME_PREFIX}{name}"
+
+    if username_taken(username):
+        msg = bot.send_message(
+            message.chat.id,
+            f"❌ نام <code>{name}</code> قبلاً استفاده شده.\n\n"
+            "یک نام دیگر ارسال کن:"
+        )
+        bot.register_next_step_handler(msg, trial_get_name)
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("✅ تایید و ساخت", callback_data=f"trialgo:{name}"),
+        types.InlineKeyboardButton("❌ انصراف", callback_data="trialcancel"),
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "🔎 مشخصات سرویس تست:\n\n"
+        f"👤 نام کاربری: <code>{username}</code>\n\n"
+        "تایید می‌کنی؟",
+        reply_markup=kb
+    )
+
+
+# ============================================================
+# USER FLOW — STEP 3: CONFIRM & CREATE
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data == "trialcancel")
+def trial_cancel(call):
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_text("❌ لغو شد.", call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("trialgo:"))
+def trial_confirm(call):
+    name = call.data.split(":", 1)[1]
+    username = f"{USERNAME_PREFIX}{name}"
+
+    user = get_user(call.from_user.id)
+
+    if get_setting("trial_enabled", "1") != "1":
+        bot.answer_callback_query(call.id, "❌ تست رایگان غیرفعال است.", show_alert=True)
+        return
+
+    limit = int(get_setting("trial_limit", "1"))
+    used = count_user_trials(user["id"])
+
+    if used >= limit:
+        bot.answer_callback_query(call.id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", show_alert=True)
+        return
+
+    if username_taken(username):
+        bot.answer_callback_query(call.id, "❌ این نام همین الان توسط شخص دیگری گرفته شد.", show_alert=True)
+        msg = bot.send_message(call.message.chat.id, "یک نام دیگر ارسال کن:")
+        bot.register_next_step_handler(msg, trial_get_name)
         return
 
     volume = int(get_setting("trial_volume", "5"))
     duration = int(get_setting("trial_duration", "1"))
     devices = int(get_setting("trial_devices", "1"))
 
-    panel = db_execute("""
-    SELECT * FROM panels
-    WHERE active=1
-    ORDER BY assigned_sales ASC, id ASC
-    LIMIT 1
-    """, fetchone=True)
+    panel = get_trial_panel()
 
     if not panel:
-        bot.send_message(message.chat.id, "❌ در حال حاضر پنل فعالی برای تست وجود ندارد.")
+        bot.answer_callback_query(call.id, "❌ در حال حاضر پنل فعالی برای تست وجود ندارد.", show_alert=True)
         return
+
+    bot.answer_callback_query(call.id, "⏳ در حال ساخت سرویس...")
+
+    try:
+        bot.edit_message_text("⏳ در حال ساخت سرویس تست...", call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
 
     fake_plan = {
         "id": None,
@@ -52,17 +202,26 @@ def free_trial(message):
         "devices": devices
     }
 
-    result = pasarguard_create_service(panel=panel, telegram_user=user, plan=fake_plan)
+    result = pasarguard_create_service(
+        panel=panel,
+        telegram_user=user,
+        plan=fake_plan,
+        username=username
+    )
 
     if not result["success"]:
-        bot.send_message(message.chat.id, "❌ ساخت تست رایگان انجام نشد.")
+        bot.send_message(
+            call.message.chat.id,
+            f"❌ ساخت تست رایگان انجام نشد.\n\n<code>{result['error']}</code>"
+        )
         return
 
     service = create_local_service(user=user, plan=fake_plan, panel=panel, result=result)
 
     bot.send_message(
-        message.chat.id,
+        call.message.chat.id,
         "🎁 <b>تست رایگان فعال شد!</b>\n\n"
+        f"👤 نام کاربری: <code>{username}</code>\n"
         f"📊 حجم: {volume} GB\n"
         f"⏳ مدت: {duration} روز\n"
         f"📱 دستگاه: {devices}\n\n"
@@ -72,17 +231,179 @@ def free_trial(message):
 
 
 # ============================================================
-# ADMIN VIEW OF TRIAL SETTINGS (same button text, admin only)
+# ADMIN — TRIAL SETTINGS PANEL
 # ============================================================
+
+def render_trial_settings(chat_id, message_id=None):
+    enabled = get_setting("trial_enabled", "1") == "1"
+    volume = get_setting("trial_volume", "5")
+    duration = get_setting("trial_duration", "1")
+    devices = get_setting("trial_devices", "1")
+    limit = get_setting("trial_limit", "1")
+
+    panel_id = get_setting("trial_panel_id", "")
+    panel_name = "🔀 خودکار (کمترین فروش)"
+
+    if panel_id:
+        panel = db_execute("SELECT name FROM panels WHERE id=?", (panel_id,), fetchone=True)
+        if panel:
+            panel_name = panel["name"]
+
+    text = (
+        "🎁 <b>تنظیمات تست رایگان</b>\n\n"
+        f"وضعیت: {'🟢 فعال' if enabled else '🔴 غیرفعال'}\n"
+        f"📊 حجم: {volume} GB\n"
+        f"⏳ مدت: {duration} روز\n"
+        f"📱 دستگاه: {devices}\n"
+        f"🔁 سقف استفاده هر کاربر: {limit} بار\n"
+        f"🖥 پنل تست: {panel_name}\n\n"
+        "برای تغییر هرکدام روی دکمه مربوطه بزن:"
+    )
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.add(types.InlineKeyboardButton(
+        "🔴 غیرفعال کردن" if enabled else "🟢 فعال کردن",
+        callback_data="trialset:toggle"
+    ))
+
+    kb.row(
+        types.InlineKeyboardButton(f"📊 حجم: {volume}GB", callback_data="trialset:volume"),
+        types.InlineKeyboardButton(f"⏳ مدت: {duration}روز", callback_data="trialset:duration"),
+    )
+
+    kb.row(
+        types.InlineKeyboardButton(f"📱 دستگاه: {devices}", callback_data="trialset:devices"),
+        types.InlineKeyboardButton(f"🔁 سقف: {limit}", callback_data="trialset:limit"),
+    )
+
+    kb.add(types.InlineKeyboardButton(f"🖥 پنل تست: {panel_name}", callback_data="trialset:panel"))
+
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+            return
+        except Exception:
+            pass
+
+    bot.send_message(chat_id, text, reply_markup=kb)
+
 
 @bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان" and is_admin(m.from_user.id))
 def admin_trial_settings(message):
-    bot.send_message(
-        message.chat.id,
-        "🎁 <b>تنظیمات تست رایگان</b>\n\n"
-        f"وضعیت: {get_setting('trial_enabled')}\n"
-        f"حجم: {get_setting('trial_volume')} GB\n"
-        f"مدت: {get_setting('trial_duration')} روز\n"
-        f"دستگاه: {get_setting('trial_devices')}\n"
-        f"محدودیت: {get_setting('trial_limit')}"
-    )
+    render_trial_settings(message.chat.id)
+
+
+# ---------------- TOGGLE ENABLED ----------------
+
+@bot.callback_query_handler(func=lambda call: call.data == "trialset:toggle")
+def trial_setting_toggle(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    current = get_setting("trial_enabled", "1")
+    set_setting("trial_enabled", "0" if current == "1" else "1")
+
+    bot.answer_callback_query(call.id, "✅ تغییر کرد.")
+    render_trial_settings(call.message.chat.id, call.message.message_id)
+
+
+# ---------------- NUMBER SETTINGS (volume / duration / devices / limit) ----------------
+
+NUMBER_SETTINGS = {
+    "volume": ("trial_volume", "📊 حجم جدید را به GB ارسال کن (فقط عدد):"),
+    "duration": ("trial_duration", "⏳ مدت جدید را به روز ارسال کن (فقط عدد):"),
+    "devices": ("trial_devices", "📱 تعداد دستگاه جدید را ارسال کن (فقط عدد):"),
+    "limit": ("trial_limit", "🔁 سقف استفاده هر کاربر را ارسال کن (فقط عدد):"),
+}
+
+
+@bot.callback_query_handler(func=lambda call: call.data.split(":")[1] in NUMBER_SETTINGS
+                             if call.data.startswith("trialset:") else False)
+def trial_setting_number_start(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    key = call.data.split(":")[1]
+    setting_key, prompt = NUMBER_SETTINGS[key]
+
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, prompt)
+    bot.register_next_step_handler(msg, trial_setting_number_save, key)
+
+
+def trial_setting_number_save(message, key):
+    text = (message.text or "").strip()
+
+    if not text.isdigit() or int(text) <= 0:
+        msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد بزرگ‌تر از صفر ارسال کن:")
+        bot.register_next_step_handler(msg, trial_setting_number_save, key)
+        return
+
+    setting_key, _ = NUMBER_SETTINGS[key]
+    set_setting(setting_key, text)
+
+    bot.send_message(message.chat.id, "✅ ذخیره شد.")
+    render_trial_settings(message.chat.id)
+
+
+# ---------------- PANEL SELECTION ----------------
+
+@bot.callback_query_handler(func=lambda call: call.data == "trialset:panel")
+def trial_setting_panel_list(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    panels = db_execute("""
+    SELECT * FROM panels
+    WHERE active=1
+    ORDER BY name
+    """, fetchall=True)
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.add(types.InlineKeyboardButton(
+        "🔀 خودکار (کمترین فروش)",
+        callback_data="trialpanelset:auto"
+    ))
+
+    for panel in panels or []:
+        kb.add(types.InlineKeyboardButton(
+            panel["name"],
+            callback_data=f"trialpanelset:{panel['id']}"
+        ))
+
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="trialset:back"))
+
+    bot.answer_callback_query(call.id)
+
+    try:
+        bot.edit_message_text(
+            "🖥 کدام پنل برای صدور تست رایگان استفاده شود؟",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb
+        )
+    except Exception:
+        bot.send_message(call.message.chat.id, "🖥 کدام پنل برای صدور تست رایگان استفاده شود؟", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("trialpanelset:"))
+def trial_setting_panel_save(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    value = call.data.split(":", 1)[1]
+    set_setting("trial_panel_id", "" if value == "auto" else value)
+
+    bot.answer_callback_query(call.id, "✅ ذخیره شد.")
+    render_trial_settings(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "trialset:back")
+def trial_setting_back(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.answer_callback_query(call.id)
+    render_trial_settings(call.message.chat.id, call.message.message_id)
