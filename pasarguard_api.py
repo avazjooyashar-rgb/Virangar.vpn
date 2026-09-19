@@ -90,9 +90,13 @@ async def _create_service_async(panel, telegram_user, plan, desired_username=Non
                 prefix=f"tg{telegram_user['telegram_id']}"
             )
 
+        # نکته: اینجا از int() استفاده نمی‌کنیم چون حجم می‌تواند
+        # اعشاری هم باشد (مثلاً 0.5 گیگ برای تست رایگان). با int()
+        # مقادیر کمتر از 1 به صفر رند می‌شدند و پنل PasarGuard
+        # data_limit=0 را «نامحدود» تفسیر می‌کند.
         user_create = UserCreate(
             username=username,
-            data_limit=Tools.gb(int(plan["volume"])),
+            data_limit=Tools.gb(float(plan["volume"])),
             expire=Tools.days(int(plan["duration"])),
             status=UserStatus.ACTIVE,
             note=(
