@@ -182,7 +182,7 @@ def trial_confirm(call):
         bot.register_next_step_handler(msg, trial_get_name)
         return
 
-    volume = int(get_setting("trial_volume", "5"))
+    volume = float(get_setting("trial_volume", "5"))
     duration = int(get_setting("trial_duration", "1"))
     devices = int(get_setting("trial_devices", "1"))
 
@@ -224,11 +224,13 @@ def trial_confirm(call):
 
     service = create_local_service(user=user, plan=fake_plan, panel=panel, result=result)
 
+    volume_display = int(volume) if volume == int(volume) else volume
+
     bot.send_message(
         call.message.chat.id,
         "🎁 <b>تست رایگان فعال شد!</b>\n\n"
         f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n"
-        f"📊 حجم: {volume} GB\n"
+        f"📊 حجم: {volume_display} GB\n"
         f"⏳ مدت: {duration} روز\n"
         f"📱 دستگاه: {devices}\n\n"
         f"🔗 لینک اشتراک:\n"
@@ -317,7 +319,7 @@ def trial_setting_toggle(call):
 # ---------------- NUMBER SETTINGS (volume / duration / devices / limit) ----------------
 
 NUMBER_SETTINGS = {
-    "volume": ("trial_volume", "📊 حجم جدید را به GB ارسال کن (فقط عدد):"),
+    "volume": ("trial_volume", "📊 حجم جدید را به GB ارسال کن (اعشار هم مجاز است، مثال: 0.5):"),
     "duration": ("trial_duration", "⏳ مدت جدید را به روز ارسال کن (فقط عدد):"),
     "devices": ("trial_devices", "📱 تعداد دستگاه جدید را ارسال کن (فقط عدد):"),
     "limit": ("trial_limit", "🔁 سقف استفاده هر کاربر را ارسال کن (فقط عدد):"),
@@ -339,12 +341,31 @@ def trial_setting_number_start(call):
 
 
 def trial_setting_number_save(message, key):
-    text = (message.text or "").strip()
+    text = (message.text or "").strip().replace(",", ".")
 
-    if not text.isdigit() or int(text) <= 0:
-        msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد بزرگ‌تر از صفر ارسال کن:")
-        bot.register_next_step_handler(msg, trial_setting_number_save, key)
-        return
+    if key == "volume":
+        # حجم می‌تواند اعشاری هم باشد (مثلاً 0.5 گیگ)
+        try:
+            value = float(text)
+        except ValueError:
+            value = -1
+
+        if value <= 0:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ لطفاً یک عدد بزرگ‌تر از صفر ارسال کن (اعشار هم مجاز است، مثال: 0.5):"
+            )
+            bot.register_next_step_handler(msg, trial_setting_number_save, key)
+            return
+
+        # اگر عدد صحیح بود بدون اعشار ذخیره شود (5 نه 5.0)
+        text = str(int(value)) if value == int(value) else str(value)
+
+    else:
+        if not text.isdigit() or int(text) <= 0:
+            msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد بزرگ‌تر از صفر ارسال کن:")
+            bot.register_next_step_handler(msg, trial_setting_number_save, key)
+            return
 
     setting_key, _ = NUMBER_SETTINGS[key]
     set_setting(setting_key, text)
