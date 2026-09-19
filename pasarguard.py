@@ -67,7 +67,7 @@ async def _test_panel_async(panel):
         }
 
 
-async def _create_service_async(panel, telegram_user, plan):
+async def _create_service_async(panel, telegram_user, plan, username=None):
     base_url = _normalize_url(panel["url"])
 
     async with PasarguardAPI(
@@ -80,12 +80,18 @@ async def _create_service_async(panel, telegram_user, plan):
             password=panel["password"],
         )
 
-        username = Tools.random_username(
-            prefix=f"tg{telegram_user['telegram_id']}"
-        )
+        # اگر یوزرنیم دلخواه (مثلاً برای تست رایگان: virangarvpn.ali)
+        # پاس داده شده باشد از همان استفاده می‌کنیم، در غیر این صورت
+        # مثل قبل یک یوزرنیم رندوم ساخته می‌شود (رفتار پلن‌های خرید عادی).
+        final_username = (username or "").strip()
+
+        if not final_username:
+            final_username = Tools.random_username(
+                prefix=f"tg{telegram_user['telegram_id']}"
+            )
 
         user_create = UserCreate(
-            username=username,
+            username=final_username,
             data_limit=Tools.gb(int(plan["volume"])),
             expire=Tools.days(int(plan["duration"])),
             status=UserStatus.ACTIVE,
@@ -135,9 +141,14 @@ def pasarguard_test_panel(panel):
         }
 
 
-def pasarguard_create_service(panel, telegram_user, plan):
+def pasarguard_create_service(panel, telegram_user, plan, username=None):
     """
     ساخت واقعی کاربر روی پنل PasarGuard و دریافت لینک اشتراک (subscription).
+
+    پارامتر username اختیاری است:
+    - برای پلن‌های عادی خالی می‌ماند و یوزرنیم رندوم ساخته می‌شود.
+    - برای تست رایگان، یوزرنیمی که خود کاربر انتخاب کرده
+      (مثلاً virangarvpn.ali) پاس داده می‌شود.
     """
 
     if not _panel_credentials_ok(panel):
@@ -147,7 +158,9 @@ def pasarguard_create_service(panel, telegram_user, plan):
         }
 
     try:
-        return asyncio.run(_create_service_async(panel, telegram_user, plan))
+        return asyncio.run(
+            _create_service_async(panel, telegram_user, plan, username=username)
+        )
 
     except Exception as e:
         return {
