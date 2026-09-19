@@ -8,13 +8,13 @@ import re
 from telebot import types
 
 from config import bot
-from database import db_execute, get_setting, set_setting, now
+from database import db_execute, get_setting, set_setting
 from models import get_user, is_admin
-from pasarguard import pasarguard_create_service
+from pasarguard_api import pasarguard_create_service
 from services import create_local_service
 
 
-USERNAME_PREFIX = "virangarvpn."
+USERNAME_PREFIX = "virangarvpn"          # نمایش به کاربر: virangarvpn.ali
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,20}$")
 
 
@@ -31,12 +31,16 @@ def count_user_trials(user_id):
     return row["c"] if row else 0
 
 
-def username_taken(username):
+def username_taken(final_username):
+    """
+    final_username همان چیزی است که واقعاً روی پنل/دیتابیس ذخیره
+    می‌شود (پس از تبدیل نقطه به آندرلاین توسط pasarguard_api).
+    """
     row = db_execute("""
     SELECT id FROM services
     WHERE username=?
     LIMIT 1
-    """, (username,), fetchone=True)
+    """, (final_username,), fetchone=True)
 
     return bool(row)
 
@@ -44,8 +48,8 @@ def username_taken(username):
 def get_trial_panel():
     """
     اگر ادمین یک پنل مشخص برای تست رایگان انتخاب کرده باشد همان
-    برگردانده می‌شود، در غیر این صورت مثل قبل به‌صورت خودکار
-    پنلی با کمترین assigned_sales انتخاب می‌شود.
+    برگردانده می‌شود، وگرنه مثل قبل پنلی با کمترین assigned_sales
+    به‌صورت خودکار انتخاب می‌شود.
     """
 
     panel_id = get_setting("trial_panel_id", "")
@@ -113,9 +117,10 @@ def trial_get_name(message):
         return
 
     name = raw.lower()
-    username = f"{USERNAME_PREFIX}{name}"
+    display_username = f"{USERNAME_PREFIX}.{name}"     # چیزی که به کاربر نشون می‌دیم
+    final_username = f"{USERNAME_PREFIX}_{name}"        # چیزی که واقعاً روی پنل ساخته می‌شود
 
-    if username_taken(username):
+    if username_taken(final_username):
         msg = bot.send_message(
             message.chat.id,
             f"❌ نام <code>{name}</code> قبلاً استفاده شده.\n\n"
@@ -133,7 +138,7 @@ def trial_get_name(message):
     bot.send_message(
         message.chat.id,
         "🔎 مشخصات سرویس تست:\n\n"
-        f"👤 نام کاربری: <code>{username}</code>\n\n"
+        f"👤 نام کاربری: <code>{display_username}</code>\n\n"
         "تایید می‌کنی؟",
         reply_markup=kb
     )
@@ -155,7 +160,8 @@ def trial_cancel(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("trialgo:"))
 def trial_confirm(call):
     name = call.data.split(":", 1)[1]
-    username = f"{USERNAME_PREFIX}{name}"
+    display_username = f"{USERNAME_PREFIX}.{name}"
+    final_username = f"{USERNAME_PREFIX}_{name}"
 
     user = get_user(call.from_user.id)
 
@@ -170,7 +176,7 @@ def trial_confirm(call):
         bot.answer_callback_query(call.id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", show_alert=True)
         return
 
-    if username_taken(username):
+    if username_taken(final_username):
         bot.answer_callback_query(call.id, "❌ این نام همین الان توسط شخص دیگری گرفته شد.", show_alert=True)
         msg = bot.send_message(call.message.chat.id, "یک نام دیگر ارسال کن:")
         bot.register_next_step_handler(msg, trial_get_name)
@@ -206,7 +212,7 @@ def trial_confirm(call):
         panel=panel,
         telegram_user=user,
         plan=fake_plan,
-        username=username
+        desired_username=display_username     # pasarguard_api خودش نقطه رو به _ تبدیل می‌کند
     )
 
     if not result["success"]:
@@ -221,7 +227,7 @@ def trial_confirm(call):
     bot.send_message(
         call.message.chat.id,
         "🎁 <b>تست رایگان فعال شد!</b>\n\n"
-        f"👤 نام کاربری: <code>{username}</code>\n"
+        f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n"
         f"📊 حجم: {volume} GB\n"
         f"⏳ مدت: {duration} روز\n"
         f"📱 دستگاه: {devices}\n\n"
@@ -318,14 +324,14 @@ NUMBER_SETTINGS = {
 }
 
 
-@bot.callback_query_handler(func=lambda call: call.data.split(":")[1] in NUMBER_SETTINGS
-                             if call.data.startswith("trialset:") else False)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("trialset:")
+                             and call.data.split(":")[1] in NUMBER_SETTINGS)
 def trial_setting_number_start(call):
     if not is_admin(call.from_user.id):
         return
 
     key = call.data.split(":")[1]
-    setting_key, prompt = NUMBER_SETTINGS[key]
+    _, prompt = NUMBER_SETTINGS[key]
 
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.message.chat.id, prompt)
