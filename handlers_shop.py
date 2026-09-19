@@ -188,4 +188,166 @@ def receive_username(message, plan_id):
     plan = db_execute(
         "SELECT * FROM plans WHERE id=? AND active=1",
         (plan_id,),
-        fetchone=T
+        fetchone=True
+    )
+    if not plan:
+        bot.send_message(message.chat.id, "❌ این پلن دیگر موجود نیست.")
+        return
+
+    username = f"{USERNAME_PREFIX}{raw}"
+    show_payment_methods(message.chat.id, message.from_user.id, plan, username)
+
+
+# ============================================================
+# STEP 4: PAYMENT METHOD SELECTION
+# ============================================================
+
+def show_payment_methods(chat_id, telegram_id, plan, username):
+    user = get_user(telegram_id)
+    balance = user["balance"] if user else 0
+
+    text = (
+        "✅ <b>تأیید سفارش</b>\n\n"
+        f"💎 پلن: {plan['name']}\n"
+        f"💰 قیمت: {plan['price']:,} تومان\n"
+        f"🏷 نام سرویس: <code>{username}</code>\n\n"
+        f"💰 موجودی کیف پول شما: {balance:,} تومان\n\n"
+        "روش پرداخت را انتخاب کنید:"
+    )
+    kb = types.InlineKeyboardMarkup()
+    if get_setting("manual_payment_enabled", "1") == "1":
+        kb.add(
+            types.InlineKeyboardButton(
+                "💳 کارت به کارت",
+                callback_data=f"manual:{plan['id']}:{username}"
+            )
+        )
+    kb.add(
+        types.InlineKeyboardButton(
+            "💰 پرداخت از کیف پول",
+            callback_data=f"walletpay:{plan['id']}:{username}"
+        )
+    )
+    if get_setting("online_payment_enabled", "0") == "1":
+        kb.add(
+            types.InlineKeyboardButton(
+                "🌐 پرداخت آنلاین",
+                callback_data=f"online:{plan['id']}"
+            )
+        )
+    kb.add(
+        types.InlineKeyboardButton(
+            "🔙 بازگشت",
+            callback_data=f"buypanel:{plan['panel_id']}"
+        )
+    )
+    bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+
+# ============================================================
+# MY SERVICES
+# ============================================================
+@bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
+def my_services(message):
+    user_id = internal_user_id(message.from_user.id)
+    services = db_execute("""
+    SELECT services.*, plans.name AS plan_name
+    FROM services
+    LEFT JOIN plans ON plans.id=services.plan_id
+    WHERE services.user_id=?
+    ORDER BY services.id DESC
+    """, (user_id,), fetchall=True)
+    if not services:
+        bot.send_message(
+            message.chat.id,
+            "📭 شما هنوز سرویسی ندارید."
+        )
+        return
+    kb = types.InlineKeyboardMarkup()
+    for service in services:
+        status = "🟢" if service["status"] == "active" else "🔴"
+        kb.add(
+            types.InlineKeyboardButton(
+                f"{status} {service['plan_name'] or 'سرویس'}",
+                callback_data=f"service:{service['id']}"
+            )
+        )
+    bot.send_message(
+        message.chat.id,
+        "🛡 <b>سرویس‌های من</b>\n\n"
+        "سرویس را انتخاب کن:",
+        reply_markup=kb
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("service:"))
+def service_details(call):
+    service_id = int(call.data.split(":")[1])
+    user_id = internal_user_id(call.from_user.id)
+    service = db_execute("""
+    SELECT services.*, plans.name AS plan_name
+    FROM services
+    LEFT JOIN plans ON plans.id=services.plan_id
+    WHERE services.id=? AND services.user_id=?
+    """, (
+        service_id,
+        user_id
+    ), fetchone=True)
+    if not service:
+        bot.answer_callback_query(
+            call.id,
+            "سرویس پیدا نشد.",
+            show_alert=True
+        )
+        return
+    remaining = max(0, service["volume"] - service["used_volume"])
+    text = (
+        "🛡 <b>جزئیات سرویس</b>\n\n"
+        f"📦 پلن: {service['plan_name'] or '---'}\n"
+        f"📊 حجم کل: {service['volume']} GB\n"
+        f"📈 باقی‌مانده: {remaining} GB\n"
+        f"📱 دستگاه: {service['devices']}\n"
+        f"⏳  انقضا: {service['expires_at'] or '---'}\n"
+        f"📌 وضعیت: {service['status']}\n"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔐 کانفیگ", callback_data=f"config:{service_id}"))
+    kb.add(types.InlineKeyboardButton("🔄 تمدید", callback_data=f"renew:{service_id}"))
+    kb.add(types.InlineKeyboardButton("📊 افزایش حجم", callback_data=f"increase:{service_id}"))
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config:"))
+def service_config(call):
+    service_id = int(call.data.split(":")[1])
+    user_id = internal_user_id(call.from_user.id)
+    service = db_execute("""
+    SELECT * FROM services
+    WHERE id=? AND user_id=?
+    """, (service_id, user_id), fetchone=True)
+    if not service:
+        return
+    config = service["config"] or "لینک اشتراک هنوز موجود نیست."
+    bot.send_message(
+        call.message.chat.id,
+        f"🔗 <b>لینک اشتراک سرویس</b>\n\n"
+        f"<code>{config}</code>"
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("renew:"))
+def renew_service(call):
+    bot.send_message(
+        call.message.chat.id,
+        "🔄 تمدید سرویس از داخل سیستم پرداخت انجام می‌شود.\n\n"
+        "در مرحله بعد پلن تمدید را انتخاب می‌کنیم."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("increase:"))
+def increase_service(call):
+    bot.send_message(
+        call.message.chat.id,
+        "📊 افزایش حجم آماده مدیریت است.\n\n"
+        "در مرحله بعد حجم‌های قابل خرید نمایش داده می‌شوند."
+    )
