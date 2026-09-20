@@ -16,7 +16,7 @@ from pasarguard import pasarguard_test_panel
 PANELS_PER_PAGE = 6
 
 
-@bot.message_handler(func=lambda m: m.text == "🖥 پنل‌ها")
+@bot.message_handler(func=lambda m: m.text == "🖥 مدیریت پنل‌ها")
 @admin_only
 def admin_panels(message):
     kb = types.InlineKeyboardMarkup()
@@ -35,12 +35,34 @@ def admin_panels(message):
 
 # ---------------- ADD PANEL WIZARD ----------------
 
+def _cancel_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬅️ انصراف", callback_data="paneladd_cancel"))
+    return kb
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "paneladd_cancel")
+def panel_add_cancel(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    bot.answer_callback_query(call.id, "لغو شد.")
+
+    try:
+        bot.edit_message_text("❌ افزودن پنل لغو شد.", call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+    admin_panels(call.message)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "panel_add")
 def panel_add(call):
     if not is_admin(call.from_user.id):
         return
 
-    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:")
+    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=_cancel_kb())
     bot.register_next_step_handler(call.message, panel_add_name)
 
 
@@ -49,7 +71,8 @@ def panel_add_name(message):
     bot.send_message(
         message.chat.id,
         "🌐 آدرس پنل را با پروتکل و پورت ارسال کنید:\n"
-        "مثال: <code>https://panel.example.com:8443</code>"
+        "مثال: <code>https://panel.example.com:8443</code>",
+        reply_markup=_cancel_kb()
     )
     bot.register_next_step_handler(message, panel_add_url, name)
 
@@ -60,14 +83,15 @@ def panel_add_url(message, name):
         message.chat.id,
         "👤 یوزرنیم ادمین پنل را ارسال کنید:\n\n"
         "⚠️ باید یک ادمین <b>sudo</b> باشد نه اپراتور محدود، "
-        "چون برای ساخت کاربر لازم است ربات به همه‌ی گروه‌های پنل دسترسی داشته باشد."
+        "چون برای ساخت کاربر لازم است ربات به همه‌ی گروه‌های پنل دسترسی داشته باشد.",
+        reply_markup=_cancel_kb()
     )
     bot.register_next_step_handler(message, panel_add_username, name, url)
 
 
 def panel_add_username(message, name, url):
     username = message.text.strip()
-    bot.send_message(message.chat.id, "🔐 Password پنل را ارسال کنید:")
+    bot.send_message(message.chat.id, "🔐 Password پنل را ارسال کنید:", reply_markup=_cancel_kb())
     bot.register_next_step_handler(message, panel_add_password, name, url, username)
 
 
@@ -126,7 +150,7 @@ def panel_add_password(message, name, url, username):
             message.chat.id,
             "⚠️ <b>پنل به دیتابیس اضافه شد، اما اتصال ناموفق بود.</b>\n\n"
             f"❌ خطا: <code>{result['error']}</code>\n\n"
-            "آدرس/یوزرنیم/پسورد رو بررسی کن و از منوی «🖥 پنل‌ها» "
+            "آدرس/یوزرنیم/پسورد رو بررسی کن و از منوی «🖥 مدیریت پنل‌ها» "
             "روی «🔌 تست اتصال» بزن تا دوباره امتحان کنی."
         )
 
@@ -279,6 +303,18 @@ def render_panel_details(chat_id, panel_id, message_id=None):
     bot.send_message(chat_id, text, reply_markup=kb)
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("panelbackto:"))
+def panel_back_to_details(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    panel_id = int(call.data.split(":")[1])
+
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+    render_panel_details(call.message.chat.id, panel_id, call.message.message_id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("panel:"))
 def panel_details(call):
     if not is_admin(call.from_user.id):
@@ -303,10 +339,14 @@ def panel_rename_start(call):
         bot.answer_callback_query(call.id, "پنل پیدا نشد.", show_alert=True)
         return
 
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{panel_id}"))
+
     bot.answer_callback_query(call.id)
     msg = bot.send_message(
         call.message.chat.id,
-        f"✏️ نام فعلی: <b>{panel['name']}</b>\n\nنام جدید پنل را ارسال کنید:"
+        f"✏️ نام فعلی: <b>{panel['name']}</b>\n\nنام جدید پنل را ارسال کنید:",
+        reply_markup=kb
     )
     bot.register_next_step_handler(msg, panel_rename_save, panel_id)
 
@@ -341,10 +381,14 @@ def panel_capacity_start(call):
         bot.answer_callback_query(call.id, "پنل پیدا نشد.", show_alert=True)
         return
 
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{panel_id}"))
+
     bot.answer_callback_query(call.id)
     msg = bot.send_message(
         call.message.chat.id,
-        f"📊 ظرفیت فعلی: <b>{panel['capacity']}</b>\n\nظرفیت جدید را به‌صورت عدد ارسال کنید:"
+        f"📊 ظرفیت فعلی: <b>{panel['capacity']}</b>\n\nظرفیت جدید را به‌صورت عدد ارسال کنید:",
+        reply_markup=kb
     )
     bot.register_next_step_handler(msg, panel_capacity_save, panel_id)
 
