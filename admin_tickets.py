@@ -8,7 +8,7 @@ from database import db_execute
 from decorators import admin_only
 
 
-@bot.message_handler(func=lambda m: m.text == "🎫 تیکت‌ها")
+@bot.message_handler(func=lambda m: m.text == "🎫 مدیریت تیکت‌ها")
 @admin_only
 def admin_tickets(message):
     tickets = db_execute("""
