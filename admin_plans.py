@@ -87,7 +87,7 @@ def plans_main_keyboard():
 # MAIN PLAN MENU
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "💎 پلن‌های VPN")
+@bot.message_handler(func=lambda m: m.text == "💎 مدیریت پلن‌های VPN")
 @admin_only
 def admin_plans(message):
 
