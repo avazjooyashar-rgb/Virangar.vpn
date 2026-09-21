@@ -75,7 +75,7 @@ def get_trial_panel():
 # USER FLOW — STEP 1: START
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان" and not is_admin(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان")
 def free_trial(message):
     user = get_user(message.from_user.id)
 
@@ -297,7 +297,7 @@ def render_trial_settings(chat_id, message_id=None):
     bot.send_message(chat_id, text, reply_markup=kb)
 
 
-@bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان" and is_admin(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text == "🎁 مدیریت تست رایگان" and is_admin(m.from_user.id))
 def admin_trial_settings(message):
     render_trial_settings(message.chat.id)
 
