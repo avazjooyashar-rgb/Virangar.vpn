@@ -238,6 +238,7 @@ def init_db():
             method TEXT,
             receipt_file_id TEXT,
             receipt_type TEXT,
+            custom_username TEXT,
             status TEXT DEFAULT 'pending',
             service_id INTEGER,
             created_at TEXT,
@@ -250,6 +251,26 @@ def init_db():
                 REFERENCES plans(id)
         )
         """)
+
+        # ====================================================
+        # PAYMENTS MIGRATION
+        # برای دیتابیس‌های قدیمی که ستون custom_username رو ندارن
+        # (بدون این migration، ثبت پرداخت دستی/کیف‌پولی خطا می‌داد)
+        # ====================================================
+
+        payment_columns = {
+            row["name"]
+            for row in cur.execute(
+                "PRAGMA table_info(payments)"
+            ).fetchall()
+        }
+
+        if "custom_username" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN custom_username TEXT
+            """)
 
         # ====================================================
         # TRANSACTIONS
