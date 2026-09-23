@@ -465,27 +465,3 @@ def service_config(call):
         f"<code>{config}</code>",
         parse_mode="HTML"
     )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("renew:"))
-def renew_service(call):
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "🔄 <b>تمدید سرویس</b>\n\n"
-        "این بخش به‌زودی به سیستم پرداخت وصل می‌شود.\n"
-        "در حال حاضر برای تمدید با پشتیبانی در تماس باشید.",
-        parse_mode="HTML"
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("increase:"))
-def increase_service(call):
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "📈 <b>افزایش حجم</b>\n\n"
-        "این بخش به‌زودی به سیستم پرداخت وصل می‌شود.\n"
-        "در حال حاضر برای افزایش حجم با پشتیبانی در تماس باشید.",
-        parse_mode="HTML"
-    )
