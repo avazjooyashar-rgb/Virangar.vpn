@@ -4,12 +4,14 @@
 # ============================================================
 
 import html
+from datetime import datetime
 
 from telebot import types
 
 from config import bot, SUPER_ADMIN_ID
 from database import db_execute, get_setting, now
 from models import get_user, is_admin, internal_user_id
+from keyboards import user_keyboard, admin_keyboard
 
 
 def is_support_staff(tg_id):
@@ -82,11 +84,61 @@ def render(chat_id, text, kb, message_id=None):
     bot.send_message(chat_id, text, reply_markup=kb)
 
 
+def relative_time(dt_str):
+    """تبدیل تاریخ ذخیره‌شده به زمان نسبی مثل '۲ ساعت پیش'."""
+    try:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return dt_str or "-"
+    diff = datetime.utcnow() - dt
+    seconds = diff.total_seconds()
+    if seconds < 60:
+        return "چند لحظه پیش"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} دقیقه پیش"
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"{hours} ساعت پیش"
+    days = int(seconds // 86400)
+    if days == 1:
+        return "دیروز"
+    if days < 7:
+        return f"{days} روز پیش"
+    return dt.strftime("%Y-%m-%d")
+
+
+def hours_since(dt_str):
+    try:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return 0
+    return (datetime.utcnow() - dt).total_seconds() / 3600
+
+
+def last_message_preview(ticket_id, limit=40):
+    row = db_execute("""
+    SELECT message FROM ticket_messages
+    WHERE ticket_id=?
+    ORDER BY id DESC LIMIT 1
+    """, (ticket_id,), fetchone=True)
+    if not row or not row["message"]:
+        return "-"
+    text = row["message"].strip().replace("\n", " ")
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 # ============================================================
 # ============  USER SIDE  ===================================
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and not is_support_staff(m.from_user.id))
+# نکته مهم: این دکمه («🆘 پشتیبانی») فقط توی منوی کاربر وجود داره.
+# قبلاً بر اساس نقش کاربر (ادمین/غیرادمین) تصمیم می‌گرفت کدوم فلو
+# اجرا بشه، که باعث می‌شد سوپرادمین وقتی از طریق «🏠 منوی کاربر»
+# وارد منوی کاربر می‌شه و این دکمه رو می‌زنه، به‌جای فرم ثبت تیکت،
+# پنل مدیریت پشتیبانی براش باز بشه. حالا این دکمه همیشه (برای هرکسی
+# که می‌زندش، حتی سوپرادمین) فرم کاربر رو باز می‌کنه.
+@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی")
 def user_support_entry(message):
     render_user_menu(message.chat.id)
 
@@ -101,6 +153,8 @@ def render_user_menu(chat_id, message_id=None):
         username = support_username[1:] if support_username.startswith("@") else support_username
         kb.add(types.InlineKeyboardButton("👨‍💻 ارتباط مستقیم", url=f"https://t.me/{username}"))
 
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="sup:back_main"))
+
     render(
         chat_id,
         "🆘 <b>مرکز پشتیبانی</b>\n\n"
@@ -108,6 +162,16 @@ def render_user_menu(chat_id, message_id=None):
         kb,
         message_id
     )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "sup:back_main")
+def sup_back_main(call):
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=user_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sup:menu")
@@ -328,21 +392,69 @@ def user_reply_save(message, ticket_id):
 # ============  ADMIN SIDE  ===================================
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی" and is_support_staff(m.from_user.id))
+# این دکمه («🎫 مدیریت تیکت‌ها») فقط توی منوی سوپرادمین هست
+# (جدا از دکمه‌ی «🆘 پشتیبانی» که مخصوص کاربرهاست) — برای همین
+# دیگه نیازی به چک نقش رو متن دکمه نیست، خود دکمه فقط تو کیبورد
+# ادمین وجود داره. با این حال چک is_support_staff رو برای امنیت
+# بیشتر نگه می‌داریم (اگه یه‌جای دیگه هم صدا زده بشه).
+@bot.message_handler(func=lambda m: m.text == "🎫 مدیریت تیکت‌ها" and is_support_staff(m.from_user.id))
 def admin_support_entry(message):
     render_admin_menu(message.chat.id)
 
 
 def render_admin_menu(chat_id, message_id=None):
     open_count = db_execute(
-        "SELECT COUNT(*) c FROM tickets WHERE status IN ('open')", fetchone=True
+        "SELECT COUNT(*) c FROM tickets WHERE status='open'", fetchone=True
+    )["c"]
+    answered_count = db_execute(
+        "SELECT COUNT(*) c FROM tickets WHERE status='answered'", fetchone=True
+    )["c"]
+    closed_count = db_execute(
+        "SELECT COUNT(*) c FROM tickets WHERE status='closed'", fetchone=True
     )["c"]
 
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(f"📥 تیکت‌های باز ({open_count})", callback_data="asup:list:open"))
-    kb.add(types.InlineKeyboardButton("📁 همه تیکت‌ها", callback_data="asup:list:all"))
+    # قدیمی‌ترین تیکت باز که هنوز جواب نگرفته (برای هشدار)
+    oldest_open = db_execute("""
+    SELECT updated_at FROM tickets WHERE status='open'
+    ORDER BY updated_at ASC LIMIT 1
+    """, fetchone=True)
 
-    render(chat_id, "🛠 <b>مدیریت پشتیبانی</b>\n\nیکی از گزینه‌ها رو انتخاب کن:", kb, message_id)
+    warning = ""
+    if oldest_open:
+        hrs = hours_since(oldest_open["updated_at"])
+        if hrs >= 24:
+            warning = f"\n🚨 یه تیکت بیش از {int(hrs // 24)} روزه بی‌پاسخ مونده!"
+        elif hrs >= 3:
+            warning = f"\n⏰ یه تیکت {int(hrs)} ساعته بی‌پاسخ مونده."
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(f"🟢 نیاز به پاسخ ({open_count})", callback_data="asup:list:open:0"))
+    kb.add(types.InlineKeyboardButton(f"💬 پاسخ‌داده‌شده ({answered_count})", callback_data="asup:list:answered:0"))
+    kb.add(types.InlineKeyboardButton(f"🔒 بسته‌شده ({closed_count})", callback_data="asup:list:closed:0"))
+    kb.add(types.InlineKeyboardButton("📁 همه تیکت‌ها", callback_data="asup:list:all:0"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="asup:back_main"))
+
+    render(
+        chat_id,
+        "🛠 <b>مدیریت پشتیبانی</b>\n\n"
+        f"🟢 نیاز به پاسخ: <b>{open_count}</b>\n"
+        f"💬 پاسخ‌داده‌شده: <b>{answered_count}</b>\n"
+        f"🔒 بسته‌شده: <b>{closed_count}</b>"
+        f"{warning}",
+        kb, message_id
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "asup:back_main")
+def asup_back_main(call):
+    if not is_support_staff(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=admin_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "asup:menu")
@@ -358,22 +470,38 @@ def asup_list(call):
     if not is_support_staff(call.from_user.id):
         return
 
-    scope = call.data.split(":")[2]
+    parts = call.data.split(":")
+    scope = parts[2]
+    page = int(parts[3]) if len(parts) > 3 else 0
     bot.answer_callback_query(call.id)
-    render_admin_ticket_list(scope, call.message.chat.id, call.message.message_id)
+    render_admin_ticket_list(scope, page, call.message.chat.id, call.message.message_id)
 
 
-def render_admin_ticket_list(scope, chat_id, message_id=None):
-    if scope == "open":
-        tickets = db_execute("""
-        SELECT * FROM tickets WHERE status IN ('open') ORDER BY id DESC LIMIT ?
-        """, (PAGE_SIZE,), fetchall=True)
-        title = "📥 <b>تیکت‌های باز</b>"
-    else:
-        tickets = db_execute("""
-        SELECT * FROM tickets ORDER BY id DESC LIMIT ?
-        """, (PAGE_SIZE,), fetchall=True)
-        title = "📁 <b>همه تیکت‌ها (۱۵ مورد آخر)</b>"
+TICKET_PAGE_SIZE = 6
+
+
+def render_admin_ticket_list(scope, page, chat_id, message_id=None):
+    scope_titles = {
+        "open": "🟢 تیکت‌های نیازمند پاسخ",
+        "answered": "💬 تیکت‌های پاسخ‌داده‌شده",
+        "closed": "🔒 تیکت‌های بسته‌شده",
+        "all": "📁 همه تیکت‌ها",
+    }
+    title = scope_titles.get(scope, "تیکت‌ها")
+
+    where = "" if scope == "all" else "WHERE status=?"
+    params = () if scope == "all" else (scope,)
+
+    total = db_execute(f"SELECT COUNT(*) c FROM tickets {where}", params, fetchone=True)["c"]
+
+    offset = page * TICKET_PAGE_SIZE
+    tickets = db_execute(f"""
+    SELECT * FROM tickets {where}
+    ORDER BY
+        CASE status WHEN 'open' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END,
+        updated_at ASC
+    LIMIT ? OFFSET ?
+    """, params + (TICKET_PAGE_SIZE, offset), fetchall=True) or []
 
     kb = types.InlineKeyboardMarkup()
 
@@ -383,12 +511,24 @@ def render_admin_ticket_list(scope, chat_id, message_id=None):
         return
 
     for t in tickets:
-        label = f"#{t['id']} · {t['subject'][:25]} · {STATUS_LABELS.get(t['status'], t['status'])}"
-        kb.add(types.InlineKeyboardButton(label, callback_data=f"asup:view:{t['id']}"))
+        preview = last_message_preview(t["id"], limit=25)
+        overdue = ""
+        if t["status"] == "open" and hours_since(t["updated_at"]) >= 3:
+            overdue = "⏰ "
+        label = f"{overdue}#{t['id']} · {preview} · {relative_time(t['updated_at'])}"
+        kb.add(types.InlineKeyboardButton(label[:64], callback_data=f"asup:view:{t['id']}:{scope}:{page}"))
 
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="asup:menu"))
+    nav = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton("⬅️ قبلی", callback_data=f"asup:list:{scope}:{page-1}"))
+    if offset + TICKET_PAGE_SIZE < total:
+        nav.append(types.InlineKeyboardButton("بعدی ➡️", callback_data=f"asup:list:{scope}:{page+1}"))
+    if nav:
+        kb.row(*nav)
 
-    render(chat_id, title, kb, message_id)
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به منو", callback_data="asup:menu"))
+
+    render(chat_id, f"{title}\n\n{total} مورد، صفحه {page+1}", kb, message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:view:"))
@@ -396,12 +536,15 @@ def asup_view(call):
     if not is_support_staff(call.from_user.id):
         return
 
-    ticket_id = int(call.data.split(":")[2])
+    parts = call.data.split(":")
+    ticket_id = int(parts[2])
+    scope = parts[3] if len(parts) > 3 else "open"
+    page = parts[4] if len(parts) > 4 else "0"
     bot.answer_callback_query(call.id)
-    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id)
+    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id, scope, page)
 
 
-def render_admin_ticket_view(ticket_id, chat_id, message_id=None):
+def render_admin_ticket_view(ticket_id, chat_id, message_id=None, scope="open", page="0"):
     ticket = get_ticket(ticket_id)
     if not ticket:
         kb = types.InlineKeyboardMarkup()
@@ -415,6 +558,7 @@ def render_admin_ticket_view(ticket_id, chat_id, message_id=None):
     lines = [
         f"🎫 <b>تیکت #{ticket['id']}</b> — {STATUS_LABELS.get(ticket['status'], ticket['status'])}\n"
         f"👤 Telegram ID: <code>{owner_tg_id}</code>\n"
+        f"🕒 آخرین فعالیت: {relative_time(ticket['updated_at'])}\n"
     ]
 
     for m in messages[-15:]:
@@ -425,13 +569,13 @@ def render_admin_ticket_view(ticket_id, chat_id, message_id=None):
 
     if ticket["status"] != "closed":
         kb.row(
-            types.InlineKeyboardButton("✍️ پاسخ", callback_data=f"asup:reply:{ticket_id}"),
-            types.InlineKeyboardButton("🔒 بستن تیکت", callback_data=f"asup:close:{ticket_id}"),
+            types.InlineKeyboardButton("✍️ پاسخ", callback_data=f"asup:reply:{ticket_id}:{scope}:{page}"),
+            types.InlineKeyboardButton("🔒 بستن تیکت", callback_data=f"asup:close:{ticket_id}:{scope}:{page}"),
         )
     else:
-        kb.add(types.InlineKeyboardButton("🔓 بازگشایی تیکت", callback_data=f"asup:reopen:{ticket_id}"))
+        kb.add(types.InlineKeyboardButton("🔓 بازگشایی تیکت", callback_data=f"asup:reopen:{ticket_id}:{scope}:{page}"))
 
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="asup:list:open"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f"asup:list:{scope}:{page}"))
 
     render(chat_id, "\n".join(lines), kb, message_id)
 
@@ -441,7 +585,10 @@ def asup_reply_start(call):
     if not is_support_staff(call.from_user.id):
         return
 
-    ticket_id = int(call.data.split(":")[2])
+    parts = call.data.split(":")
+    ticket_id = int(parts[2])
+    scope = parts[3] if len(parts) > 3 else "open"
+    page = parts[4] if len(parts) > 4 else "0"
     ticket = get_ticket(ticket_id)
 
     if not ticket:
@@ -455,7 +602,7 @@ def asup_reply_start(call):
     bot.answer_callback_query(call.id)
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"asup:view:{ticket_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"asup:view:{ticket_id}:{scope}:{page}"))
 
     try:
         bot.edit_message_text(
@@ -465,13 +612,13 @@ def asup_reply_start(call):
     except Exception:
         bot.send_message(call.message.chat.id, f"✍️ پاسخت رو برای تیکت #{ticket_id} بنویس و بفرست:", reply_markup=kb)
 
-    bot.register_next_step_handler(call.message, admin_reply_save, ticket_id)
+    bot.register_next_step_handler(call.message, admin_reply_save, ticket_id, scope, page)
 
 
-def admin_reply_save(message, ticket_id):
+def admin_reply_save(message, ticket_id, scope="open", page="0"):
     if not (message.text or "").strip():
         msg = bot.send_message(message.chat.id, "❌ متن خالیه. دوباره بفرست:")
-        bot.register_next_step_handler(msg, admin_reply_save, ticket_id)
+        bot.register_next_step_handler(msg, admin_reply_save, ticket_id, scope, page)
         return
 
     ticket = get_ticket(ticket_id)
@@ -483,7 +630,7 @@ def admin_reply_save(message, ticket_id):
     touch_ticket(ticket_id, status="answered")
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت به تیکت", callback_data=f"asup:view:{ticket_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به تیکت", callback_data=f"asup:view:{ticket_id}:{scope}:{page}"))
     bot.send_message(message.chat.id, "✅ پاسخ ارسال شد.", reply_markup=kb)
 
     owner_tg_id = get_owner_telegram_id(ticket["user_id"])
@@ -505,11 +652,14 @@ def asup_close(call):
     if not is_support_staff(call.from_user.id):
         return
 
-    ticket_id = int(call.data.split(":")[2])
+    parts = call.data.split(":")
+    ticket_id = int(parts[2])
+    scope = parts[3] if len(parts) > 3 else "open"
+    page = parts[4] if len(parts) > 4 else "0"
     touch_ticket(ticket_id, status="closed")
 
     bot.answer_callback_query(call.id, "🔒 تیکت بسته شد.")
-    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id)
+    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id, scope, page)
 
     ticket = get_ticket(ticket_id)
     owner_tg_id = get_owner_telegram_id(ticket["user_id"]) if ticket else None
@@ -525,8 +675,11 @@ def asup_reopen(call):
     if not is_support_staff(call.from_user.id):
         return
 
-    ticket_id = int(call.data.split(":")[2])
+    parts = call.data.split(":")
+    ticket_id = int(parts[2])
+    scope = parts[3] if len(parts) > 3 else "open"
+    page = parts[4] if len(parts) > 4 else "0"
     touch_ticket(ticket_id, status="open")
 
     bot.answer_callback_query(call.id, "🔓 تیکت بازگشایی شد.")
-    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id)
+    render_admin_ticket_view(ticket_id, call.message.chat.id, call.message.message_id, scope, page)
