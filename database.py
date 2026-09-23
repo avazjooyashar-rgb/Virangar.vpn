@@ -254,8 +254,7 @@ def init_db():
 
         # ====================================================
         # PAYMENTS MIGRATION
-        # برای دیتابیس‌های قدیمی که ستون custom_username رو ندارن
-        # (بدون این migration، ثبت پرداخت دستی/کیف‌پولی خطا می‌داد)
+        # برای دیتابیس‌های قدیمی که ستون‌های جدید رو ندارن
         # ====================================================
 
         payment_columns = {
@@ -270,6 +269,38 @@ def init_db():
             cur.execute("""
             ALTER TABLE payments
             ADD COLUMN custom_username TEXT
+            """)
+
+        # نوع پرداخت: purchase (خرید جدید) / renew (تمدید) / increase (افزایش حجم) / wallet (شارژ کیف پول)
+        if "type" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN type TEXT DEFAULT 'purchase'
+            """)
+
+        # سرویسی که این پرداخت (تمدید/افزایش حجم) روش اعمال می‌شود
+        if "target_service_id" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN target_service_id INTEGER
+            """)
+
+        # مقدار گیگ اضافه‌شده در حالت افزایش حجم
+        if "extra_volume" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN extra_volume INTEGER DEFAULT 0
+            """)
+
+        # تعداد روز اضافه‌شده در حالت تمدید
+        if "extra_days" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN extra_days INTEGER DEFAULT 0
             """)
 
         # ====================================================
@@ -451,6 +482,9 @@ def init_db():
             "trial_duration": "1",
             "trial_devices": "1",
             "trial_limit": "1",
+
+            # Renewal / Volume increase
+            "extra_gb_price": "5000",
 
             # Support
             "support_username": "",
