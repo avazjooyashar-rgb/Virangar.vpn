@@ -192,6 +192,29 @@ def init_db():
             """)
 
         # ====================================================
+        # RENEWAL PLANS
+        # پلن‌های تمدید — کاملاً مستقل از پلن‌های خرید
+        # ====================================================
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS renewal_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            price INTEGER NOT NULL,
+            duration INTEGER NOT NULL,
+            volume INTEGER NOT NULL,
+            panel_id INTEGER,
+            active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT,
+            FOREIGN KEY(panel_id)
+                REFERENCES panels(id)
+                ON DELETE SET NULL
+        )
+        """)
+
+        # ====================================================
         # SERVICES
         # ====================================================
 
@@ -301,6 +324,14 @@ def init_db():
             cur.execute("""
             ALTER TABLE payments
             ADD COLUMN extra_days INTEGER DEFAULT 0
+            """)
+
+        # پلن تمدیدی که برای این پرداخت انتخاب شده (در صورت استفاده از renewal_plans)
+        if "renewal_plan_id" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN renewal_plan_id INTEGER
             """)
 
         # ====================================================
