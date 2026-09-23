@@ -8,7 +8,7 @@ from telebot import types
 from database import get_setting
 
 
-def user_keyboard():
+def user_keyboard(is_super_admin=False):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
 
     kb.row("🛒 خرید VPN", "🛡 سرویس‌های من")
@@ -16,6 +16,9 @@ def user_keyboard():
     kb.row("📜 تراکنش‌های من", "🤝 پنل نمایندگی")
     kb.row("🎫 خرید لایسنس ربات", "🆘 پشتیبانی")
     kb.row("📚 راهنما", "⚙️ حساب کاربری")
+
+    if is_super_admin:
+        kb.row("👑 پنل سوپر ادمین")
 
     return kb
 
