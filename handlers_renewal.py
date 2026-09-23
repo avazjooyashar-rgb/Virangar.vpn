@@ -2,8 +2,10 @@
 # handlers_renewal.py
 # تمدید سرویس و افزایش حجم — با پرداخت از کیف پول یا کارت به کارت
 # ============================================================
+from datetime import datetime, timedelta
+
 from telebot import types
-from config import bot, SUPER_ADMIN_ID
+from config import bot
 from database import db_execute, get_setting, set_setting, now
 from models import internal_user_id, get_user
 from decorators import admin_only
@@ -27,7 +29,6 @@ def _get_owned_service(service_id, telegram_id):
 
 
 def _extend_expiry(current_expiry, days):
-    from datetime import datetime, timedelta
     base = datetime.utcnow()
     if current_expiry:
         try:
