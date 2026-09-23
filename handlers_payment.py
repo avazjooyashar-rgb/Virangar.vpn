@@ -446,13 +446,30 @@ def payment_detail(call):
 
     dup_warning = _duplicate_receipt_warning(payment)
 
+    payment_type = payment["type"] if "type" in payment.keys() else "purchase"
+    type_label_map = {
+        "purchase": "🛒 خرید سرویس جدید",
+        "renew": "🔄 تمدید سرویس",
+        "increase": "📈 افزایش حجم",
+        "wallet": "💰 شارژ کیف پول",
+    }
+    type_label = type_label_map.get(payment_type, payment_type)
+
+    extra_line = ""
+    if payment_type == "renew":
+        extra_line = f"⏳ روزهای اضافه‌شونده: {payment['extra_days']}\n"
+    elif payment_type == "increase":
+        extra_line = f"➕ حجم اضافه‌شونده: {payment['extra_volume']} GB\n"
+
     text = (
         "💳 <b>جزئیات پرداخت</b>\n\n"
         f"🆔 Payment: <code>{payment['id']}</code>\n"
+        f"🏷 نوع: {type_label}\n"
         f"👤 کاربر: {username}\n"
         f"🆔 Telegram ID: <code>{user['telegram_id'] if user else '---'}</code>\n"
         f"💰 مبلغ: {payment['amount']:,} تومان\n"
         f"📦 پلن: {plan['name'] if plan else '---'}\n"
+        f"{extra_line}"
         f"🏷 نام سرویس: {custom_username or '---'}\n"
         f"📌 روش: {payment['method']}\n"
         f"🕒 {_relative_time(payment['created_at'])}\n\n"
@@ -506,6 +523,19 @@ def approve_payment(call):
     payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
     if not payment or payment["status"] != "pending":
         bot.answer_callback_query(call.id, "این پرداخت قبلاً بررسی شده.", show_alert=True)
+        return
+
+    # تمدید سرویس / افزایش حجم (کارت به کارت که نیاز به تأیید دستی دارن)
+    payment_type = payment["type"] if "type" in payment.keys() else "purchase"
+    if payment_type in ("renew", "increase"):
+        from handlers_renewal import apply_manual_renew_or_increase
+        ok, info = apply_manual_renew_or_increase(payment)
+        if not ok:
+            bot.answer_callback_query(call.id, f"خطا: {info}", show_alert=True)
+            return
+        db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
+        bot.answer_callback_query(call.id, "✅ تأیید و اعمال شد.")
+        payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
         return
 
     # Wallet topup
