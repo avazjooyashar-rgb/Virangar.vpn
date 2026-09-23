@@ -4,6 +4,7 @@
 # ============================================================
 
 import re
+from datetime import date
 
 from telebot import types
 
@@ -71,6 +72,53 @@ def get_trial_panel():
     """, fetchone=True)
 
 
+def get_today_trial_count():
+    """
+    تعداد تست‌های صادر شده در «امروز» را برمی‌گرداند.
+    اگر تاریخ ذخیره‌شده با امروز فرق داشته باشد، یعنی روز عوض شده
+    و شمارنده باید صفر در نظر گرفته شود (ریست خودکار روزانه).
+    """
+    saved_date = get_setting("trial_daily_date", "")
+    today = str(date.today())
+
+    if saved_date != today:
+        return 0
+
+    return int(get_setting("trial_daily_count", "0"))
+
+
+def increment_today_trial_count():
+    """
+    یکی به شمارنده‌ی تست‌های امروز اضافه می‌کند.
+    اگر روز عوض شده باشد، شمارنده از نو از ۱ شروع می‌شود.
+    """
+    today = str(date.today())
+    current = get_today_trial_count()
+
+    set_setting("trial_daily_date", today)
+    set_setting("trial_daily_count", str(current + 1))
+
+
+def daily_limit_reached():
+    """
+    بررسی می‌کند سقف روزانه (کل ربات) پر شده یا نه.
+    مقدار ۰ برای trial_daily_limit یعنی «بدون محدودیت روزانه».
+    """
+    daily_limit = int(get_setting("trial_daily_limit", "0"))
+
+    if daily_limit <= 0:
+        return False
+
+    return get_today_trial_count() >= daily_limit
+
+
+DAILY_LIMIT_MESSAGE = (
+    "🎁 امروز اینقدر استقبال از تست رایگان خوب بود که سهمیه‌ی امروز تکمیل شد!\n\n"
+    "✨ فردا با سهمیه‌ی جدید در خدمتتون هستیم.\n"
+    "اگه عجله دارید، می‌تونید یکی از پلن‌های اشتراکی رو تهیه کنید."
+)
+
+
 # ============================================================
 # USER FLOW — STEP 1: START
 # ============================================================
@@ -81,6 +129,10 @@ def free_trial(message):
 
     if get_setting("trial_enabled", "1") != "1":
         bot.send_message(message.chat.id, "❌ تست رایگان غیرفعال است.")
+        return
+
+    if daily_limit_reached():
+        bot.send_message(message.chat.id, DAILY_LIMIT_MESSAGE)
         return
 
     limit = int(get_setting("trial_limit", "1"))
@@ -169,6 +221,14 @@ def trial_confirm(call):
         bot.answer_callback_query(call.id, "❌ تست رایگان غیرفعال است.", show_alert=True)
         return
 
+    if daily_limit_reached():
+        bot.answer_callback_query(call.id, "❌ سهمیه‌ی امروز تکمیل شده.", show_alert=True)
+        try:
+            bot.edit_message_text(DAILY_LIMIT_MESSAGE, call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, DAILY_LIMIT_MESSAGE)
+        return
+
     limit = int(get_setting("trial_limit", "1"))
     used = count_user_trials(user["id"])
 
@@ -224,6 +284,9 @@ def trial_confirm(call):
 
     service = create_local_service(user=user, plan=fake_plan, panel=panel, result=result)
 
+    # فقط بعد از موفقیت‌آمیز بودن ساخت سرویس، شمارنده‌ی روزانه افزایش پیدا می‌کند
+    increment_today_trial_count()
+
     volume_display = int(volume) if volume == int(volume) else volume
 
     bot.send_message(
@@ -248,6 +311,8 @@ def render_trial_settings(chat_id, message_id=None):
     duration = get_setting("trial_duration", "1")
     devices = get_setting("trial_devices", "1")
     limit = get_setting("trial_limit", "1")
+    daily_limit = int(get_setting("trial_daily_limit", "0"))
+    daily_used = get_today_trial_count()
 
     panel_id = get_setting("trial_panel_id", "")
     panel_name = "🔀 خودکار (کمترین فروش)"
@@ -257,6 +322,8 @@ def render_trial_settings(chat_id, message_id=None):
         if panel:
             panel_name = panel["name"]
 
+    daily_limit_display = "بدون محدودیت" if daily_limit <= 0 else f"{daily_used} / {daily_limit}"
+
     text = (
         "🎁 <b>تنظیمات تست رایگان</b>\n\n"
         f"وضعیت: {'🟢 فعال' if enabled else '🔴 غیرفعال'}\n"
@@ -264,6 +331,7 @@ def render_trial_settings(chat_id, message_id=None):
         f"⏳ مدت: {duration} روز\n"
         f"📱 دستگاه: {devices}\n"
         f"🔁 سقف استفاده هر کاربر: {limit} بار\n"
+        f"📅 سقف روزانه کل ربات: {daily_limit_display}\n"
         f"🖥 پنل تست: {panel_name}\n\n"
         "برای تغییر هرکدام روی دکمه مربوطه بزن:"
     )
@@ -282,7 +350,11 @@ def render_trial_settings(chat_id, message_id=None):
 
     kb.row(
         types.InlineKeyboardButton(f"📱 دستگاه: {devices}", callback_data="trialset:devices"),
-        types.InlineKeyboardButton(f"🔁 سقف: {limit}", callback_data="trialset:limit"),
+        types.InlineKeyboardButton(f"🔁 سقف هرکاربر: {limit}", callback_data="trialset:limit"),
+    )
+
+    kb.row(
+        types.InlineKeyboardButton(f"📅 سقف روزانه: {daily_limit_display}", callback_data="trialset:daily_limit"),
     )
 
     kb.add(types.InlineKeyboardButton(f"🖥 پنل تست: {panel_name}", callback_data="trialset:panel"))
@@ -316,13 +388,18 @@ def trial_setting_toggle(call):
     render_trial_settings(call.message.chat.id, call.message.message_id)
 
 
-# ---------------- NUMBER SETTINGS (volume / duration / devices / limit) ----------------
+# ---------------- NUMBER SETTINGS (volume / duration / devices / limit / daily_limit) ----------------
 
 NUMBER_SETTINGS = {
     "volume": ("trial_volume", "📊 حجم جدید را به GB ارسال کن (اعشار هم مجاز است، مثال: 0.5):"),
     "duration": ("trial_duration", "⏳ مدت جدید را به روز ارسال کن (فقط عدد):"),
     "devices": ("trial_devices", "📱 تعداد دستگاه جدید را ارسال کن (فقط عدد):"),
     "limit": ("trial_limit", "🔁 سقف استفاده هر کاربر را ارسال کن (فقط عدد):"),
+    "daily_limit": (
+        "trial_daily_limit",
+        "📅 سقف روزانه کل ربات را ارسال کن (فقط عدد).\n"
+        "برای غیرفعال کردن محدودیت روزانه، عدد ۰ را ارسال کن:"
+    ),
 }
 
 
@@ -360,6 +437,13 @@ def trial_setting_number_save(message, key):
 
         # اگر عدد صحیح بود بدون اعشار ذخیره شود (5 نه 5.0)
         text = str(int(value)) if value == int(value) else str(value)
+
+    elif key == "daily_limit":
+        # سقف روزانه: عدد ۰ یعنی «بدون محدودیت» و مجاز است
+        if not text.isdigit():
+            msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد صحیح (۰ یا بیشتر) ارسال کن:")
+            bot.register_next_step_handler(msg, trial_setting_number_save, key)
+            return
 
     else:
         if not text.isdigit() or int(text) <= 0:
