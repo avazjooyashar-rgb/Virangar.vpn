@@ -28,7 +28,7 @@ import admin_payment_settings   # noqa: F401  (تنظیمات پرداخت، /se
 import admin_broadcast          # noqa: F401  (همگانی، عضویت اجباری)
 import admin_tickets            # noqa: F401  (تیکت‌های ادمین)
 import admin_user_menu          # noqa: F401  (سوییچ مستقیم ادمین به منوی کاربر)
-import admin_management         # noqa: F401  (مدیران، بکاپ، گزارش، امنیت، تنظیمات)
+# import admin_management       # noqa: F401  (مدیران، بکاپ، گزارش، امنیت، تنظیمات) — فایل وجود نداره، موقتاً غیرفعال شد
 
 # ---------------- FALLBACK (باید آخرین import باشد) ----------------
 import fallback                 # noqa: F401
