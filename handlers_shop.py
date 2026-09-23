@@ -8,9 +8,9 @@ from datetime import datetime
 from telebot import types
 from config import bot
 from database import db_execute, get_setting
-from models import internal_user_id, get_user
+from models import internal_user_id, get_user, is_superadmin
 from force_join import force_join_ok
-from keyboards import force_join_markup
+from keyboards import force_join_markup, user_keyboard
 
 USERNAME_PREFIX = "virangarvpn."
 
@@ -276,29 +276,7 @@ def service_label(service):
     return "🎁 سرویس تست"
 
 
-# ============================================================
-# MY SERVICES — LIST
-# ============================================================
-
-@bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
-def my_services(message):
-    user_id = internal_user_id(message.from_user.id)
-    services = db_execute("""
-    SELECT services.*, plans.name AS plan_name
-    FROM services
-    LEFT JOIN plans ON plans.id=services.plan_id
-    WHERE services.user_id=?
-    ORDER BY services.id DESC
-    """, (user_id,), fetchall=True)
-
-    if not services:
-        bot.send_message(
-            message.chat.id,
-            "📭 شما هنوز سرویسی ندارید.\n\n"
-            "برای خرید یا دریافت تست رایگان از منوی اصلی اقدام کنید."
-        )
-        return
-
+def _services_list_keyboard(services):
     kb = types.InlineKeyboardMarkup()
     for service in services:
         status_icon = "🟢" if service["status"] == "active" else "🔴"
@@ -311,6 +289,40 @@ def my_services(message):
                 callback_data=f"service:{service['id']}"
             )
         )
+    kb.add(
+        types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="services_home_back")
+    )
+    return kb
+
+
+def _get_user_services(telegram_id):
+    user_id = internal_user_id(telegram_id)
+    return db_execute("""
+    SELECT services.*, plans.name AS plan_name
+    FROM services
+    LEFT JOIN plans ON plans.id=services.plan_id
+    WHERE services.user_id=?
+    ORDER BY services.id DESC
+    """, (user_id,), fetchall=True)
+
+
+# ============================================================
+# MY SERVICES — LIST
+# ============================================================
+
+@bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
+def my_services(message):
+    services = _get_user_services(message.from_user.id)
+
+    if not services:
+        bot.send_message(
+            message.chat.id,
+            "📭 شما هنوز سرویسی ندارید.\n\n"
+            "برای خرید یا دریافت تست رایگان از منوی اصلی اقدام کنید."
+        )
+        return
+
+    kb = _services_list_keyboard(services)
 
     bot.send_message(
         message.chat.id,
@@ -325,14 +337,7 @@ def my_services(message):
 def services_back(call):
     bot.answer_callback_query(call.id)
 
-    user_id = internal_user_id(call.from_user.id)
-    services = db_execute("""
-    SELECT services.*, plans.name AS plan_name
-    FROM services
-    LEFT JOIN plans ON plans.id=services.plan_id
-    WHERE services.user_id=?
-    ORDER BY services.id DESC
-    """, (user_id,), fetchall=True)
+    services = _get_user_services(call.from_user.id)
 
     if not services:
         bot.edit_message_text(
@@ -342,18 +347,7 @@ def services_back(call):
         )
         return
 
-    kb = types.InlineKeyboardMarkup()
-    for service in services:
-        status_icon = "🟢" if service["status"] == "active" else "🔴"
-        remaining_days = days_left(service["expires_at"])
-        days_str = f" | {remaining_days} روز" if remaining_days is not None else ""
-
-        kb.add(
-            types.InlineKeyboardButton(
-                f"{status_icon} {service_label(service)}{days_str}",
-                callback_data=f"service:{service['id']}"
-            )
-        )
+    kb = _services_list_keyboard(services)
 
     bot.edit_message_text(
         "🛡 <b>سرویس‌های من</b>\n\n"
@@ -362,6 +356,28 @@ def services_back(call):
         call.message.message_id,
         reply_markup=kb,
         parse_mode="HTML"
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "services_home_back")
+def services_home_back(call):
+    bot.answer_callback_query(call.id)
+
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    bot.send_message(
+        call.message.chat.id,
+        "🏠 بازگشت به منوی اصلی",
+        reply_markup=user_keyboard(
+            is_super_admin=is_superadmin(call.from_user.id)
+        )
     )
 
 
