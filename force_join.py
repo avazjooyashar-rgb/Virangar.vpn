@@ -7,7 +7,7 @@ import logging
 
 from config import bot, BOT_NAME
 from database import get_setting
-from models import ensure_user
+from models import ensure_user, is_superadmin
 from keyboards import user_keyboard, force_join_markup
 
 
@@ -64,7 +64,9 @@ def start(message):
     bot.send_message(
         message.chat.id,
         text,
-        reply_markup=user_keyboard()
+        reply_markup=user_keyboard(
+            is_super_admin=is_superadmin(message.from_user.id)
+        )
     )
 
 
@@ -79,7 +81,9 @@ def check_join(call):
         bot.send_message(
             call.message.chat.id,
             "🔥 حالا می‌تونی از ربات استفاده کنی.",
-            reply_markup=user_keyboard()
+            reply_markup=user_keyboard(
+                is_super_admin=is_superadmin(call.from_user.id)
+            )
         )
     else:
         bot.answer_callback_query(
