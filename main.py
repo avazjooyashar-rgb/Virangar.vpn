@@ -11,6 +11,7 @@ from database import init_db, DB_PATH
 # ---------------- USER-SIDE HANDLERS ----------------
 import force_join          # noqa: F401  (/start, عضویت اجباری)
 import handlers_shop        # noqa: F401  (خرید VPN، سرویس‌های من)
+import handlers_renewal     # noqa: F401  (تمدید سرویس، افزایش حجم)
 import handlers_payment     # noqa: F401  (پرداخت‌ها، تأیید/رد)
 import handlers_wallet      # noqa: F401  (کیف پول، تراکنش‌ها)
 import handlers_trial       # noqa: F401  (تست رایگان)
