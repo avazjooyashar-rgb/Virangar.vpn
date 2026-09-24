@@ -34,6 +34,21 @@ def _sanitize_username(raw):
     return cleaned or None
 
 
+def _to_timestamp(value):
+    """
+    فیلد expire در نسخه‌های مختلف SDK پاسارگارد گاهی datetime و گاهی
+    عدد timestamp برمی‌گردد. این تابع هر دو حالت را به int timestamp
+    تبدیل می‌کند تا مقایسه و محاسبات ریاضی روی آن خطا ندهد.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
 # ============================================================
 # ASYNC CORE
 # ============================================================
@@ -144,8 +159,10 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
         current_limit_gb = (getattr(current, "data_limit", 0) or 0) / (1024 ** 3)
         new_limit_gb = current_limit_gb + float(add_volume_gb)
 
-        current_expire = getattr(current, "expire", None)
-        base_ts = current_expire if current_expire and current_expire > int(time.time()) else int(time.time())
+        # --- تبدیل امن expire به timestamp عددی، چه datetime باشد چه int ---
+        current_expire_ts = _to_timestamp(getattr(current, "expire", None))
+        now_ts = int(time.time())
+        base_ts = current_expire_ts if (current_expire_ts and current_expire_ts > now_ts) else now_ts
         new_expire_ts = base_ts + int(add_days) * 86400
 
         modify = UserModify(
