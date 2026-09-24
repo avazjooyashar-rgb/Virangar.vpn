@@ -1,3 +1,8 @@
+# ============================================================
+# handlers_renewal.py
+# تمدید سرویس و افزایش حجم — همیشه اول روی پنل PasarGuard اعمال
+# می‌شود و فقط در صورت موفقیت پنل، دیتابیس داخلی آپدیت می‌شود.
+# ============================================================
 from datetime import datetime, timedelta
 
 from telebot import types
@@ -6,6 +11,10 @@ from database import db_execute, get_setting, now
 from models import internal_user_id, get_user
 from pasarguard_api import pasarguard_apply_renewal, pasarguard_apply_volume_increase
 
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def _get_owned_service(service_id, telegram_id):
     user_id = internal_user_id(telegram_id)
@@ -38,7 +47,7 @@ def _extend_expiry(current_expiry, days):
 
 
 # ============================================================
-# RENEW — STEP 1: نمایش جزئیات (بدون تغییر)
+# RENEW — STEP 1: نمایش جزئیات و انتخاب روش پرداخت
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renew:") and call.data.count(":") == 1)
@@ -49,6 +58,7 @@ def renew_service(call):
     if not service:
         bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
         return
+
     if not service["plan_id"]:
         bot.answer_callback_query(
             call.id,
@@ -58,6 +68,7 @@ def renew_service(call):
         return
 
     new_total_volume = service["volume"] + service["plan_volume"]
+
     text = (
         "🔄 <b>تمدید سرویس</b>\n\n"
         f"📦 پلن: {service['plan_name']}\n"
@@ -77,12 +88,17 @@ def renew_service(call):
     kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                           reply_markup=kb, parse_mode="HTML")
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
 
 
 # ============================================================
-# RENEW — پرداخت از کیف پول (فوری) — اصلاح‌شده
+# RENEW — پرداخت از کیف پول (فوری)
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renewwallet:"))
@@ -107,10 +123,14 @@ def renew_wallet(call):
 
     panel = _get_panel(service["panel_id"])
     if not panel or not service["username"]:
-        bot.answer_callback_query(call.id, "❌ اطلاعات پنل این سرویس ناقص است. به پشتیبانی اطلاع دهید.", show_alert=True)
+        bot.answer_callback_query(
+            call.id,
+            "❌ اطلاعات پنل این سرویس ناقص است. به پشتیبانی اطلاع دهید.",
+            show_alert=True
+        )
         return
 
-    # اول پنل، بعد کیف پول و دیتابیس داخلی — تا هیچوقت این دو ناهماهنگ نشوند
+    # اول پنل، بعد کیف پول و دیتابیس داخلی
     panel_result = pasarguard_apply_renewal(
         panel, service["username"], service["plan_volume"], service["plan_duration"]
     )
@@ -132,7 +152,8 @@ def renew_wallet(call):
     WHERE id=?
     """, (new_total_volume, new_expiry, now(), service_id))
     db_execute("""
-    INSERT INTO transactions (user_id, amount, type, description, reference, created_at)
+    INSERT INTO transactions
+    (user_id, amount, type, description, reference, created_at)
     VALUES (?, ?, 'debit', ?, ?, ?)
     """, (user["id"], -price, f"تمدید سرویس {service['plan_name']}", f"renew:{service_id}", now()))
     db_execute("""
@@ -151,11 +172,408 @@ def renew_wallet(call):
         f"🎉 <b>تمدید موفق</b>\n\n"
         f"📦 پلن: {service['plan_name']}\n"
         f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>\n"
-        f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>\n\n"
-        f"✅ این مقادیر مستقیماً از پنل خوانده شده و تضمینی است.",
+        f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
         parse_mode="HTML"
     )
 
 
-# renewcard و receive_renew_receipt بدون تغییر می‌مانند (فقط رسید ثبت می‌کنند)
-# ... (همان کدهای قبلی خودتان را نگه دارید)
+# ============================================================
+# RENEW — کارت به کارت (نیاز به تأیید ادمین)
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("renewcard:"))
+def renew_card(call):
+    service_id = int(call.data.split(":")[1])
+    service = _get_owned_service(service_id, call.from_user.id)
+
+    if not service or not service["plan_id"]:
+        bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
+        return
+
+    card = get_setting("card_number", "")
+    holder = get_setting("card_holder", "")
+    if not card:
+        bot.answer_callback_query(call.id, "پرداخت کارت به کارت فعلاً تنظیم نشده.", show_alert=True)
+        return
+
+    text = (
+        "💳 <b>پرداخت کارت به کارت — تمدید سرویس</b>\n\n"
+        f"💰 مبلغ: <b>{service['plan_price']:,} تومان</b>\n\n"
+        f"💳 شماره کارت:\n<code>{card}</code>\n\n"
+        f"👤 به نام: <b>{holder or '---'}</b>\n\n"
+        "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
+    )
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+    bot.register_next_step_handler(call.message, receive_renew_receipt, service_id)
+
+
+def receive_renew_receipt(message, service_id):
+    if not message.photo:
+        sent = bot.send_message(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.")
+        bot.register_next_step_handler(sent, receive_renew_receipt, service_id)
+        return
+
+    service = _get_owned_service(service_id, message.from_user.id)
+    if not service or not service["plan_id"]:
+        bot.send_message(message.chat.id, "❌ سرویس پیدا نشد.")
+        return
+
+    file_id = message.photo[-1].file_id
+    user_id = internal_user_id(message.from_user.id)
+
+    db_execute("""
+    INSERT INTO payments
+    (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
+     type, target_service_id, extra_days, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'renew', ?, ?, ?, 'pending', ?, ?)
+    """, (
+        user_id, service["plan_id"], service["plan_price"], file_id,
+        service_id, service["plan_duration"], service["plan_volume"], now(), now()
+    ))
+
+    bot.send_message(
+        message.chat.id,
+        "✅ رسید شما ثبت شد.\n\n"
+        "⏳ درخواست تمدید در انتظار بررسی مدیریت است."
+    )
+
+
+# ============================================================
+# INCREASE VOLUME — STEP 1: نمایش بسته‌های فعال
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("increase:") and call.data.count(":") == 1)
+def increase_service(call):
+    service_id = int(call.data.split(":")[1])
+    service = _get_owned_service(service_id, call.from_user.id)
+
+    if not service:
+        bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
+        return
+
+    packages = db_execute(
+        "SELECT * FROM volume_packages WHERE active=1 ORDER BY sort_order ASC, id ASC",
+        fetchall=True
+    )
+
+    if not packages:
+        bot.answer_callback_query(
+            call.id,
+            "فعلاً هیچ بسته افزایش حجمی تعریف نشده. با پشتیبانی تماس بگیرید.",
+            show_alert=True
+        )
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    for pkg in packages:
+        kb.add(
+            types.InlineKeyboardButton(
+                f"📈 {pkg['name']} — {pkg['volume']}GB — {pkg['price']:,} تومان",
+                callback_data=f"incpkg:{service_id}:{pkg['id']}"
+            )
+        )
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"service:{service_id}"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "📈 <b>افزایش حجم سرویس</b>\n\n"
+        "یکی از بسته‌های زیر را انتخاب کنید:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# INCREASE VOLUME — STEP 2: انتخاب روش پرداخت
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("incpkg:"))
+def increase_package_selected(call):
+    _, service_id, pkg_id = call.data.split(":")
+    service_id = int(service_id)
+    pkg_id = int(pkg_id)
+
+    service = _get_owned_service(service_id, call.from_user.id)
+    if not service:
+        bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
+        return
+
+    pkg = db_execute(
+        "SELECT * FROM volume_packages WHERE id=? AND active=1",
+        (pkg_id,),
+        fetchone=True
+    )
+    if not pkg:
+        bot.answer_callback_query(call.id, "این بسته دیگر فعال نیست.", show_alert=True)
+        return
+
+    text = (
+        "📈 <b>تأیید افزایش حجم</b>\n\n"
+        f"🏷 بسته: {pkg['name']}\n"
+        f"➕ حجم: {pkg['volume']} GB\n"
+        f"💰 قیمت: {pkg['price']:,} تومان\n\n"
+        "روش پرداخت را انتخاب کنید:"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("💰 پرداخت از کیف پول", callback_data=f"incwallet:{service_id}:{pkg_id}"))
+    if get_setting("manual_payment_enabled", "1") == "1":
+        kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data=f"inccard:{service_id}:{pkg_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"increase:{service_id}"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# INCREASE VOLUME — پرداخت از کیف پول (فوری)
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("incwallet:"))
+def increase_wallet(call):
+    _, service_id, pkg_id = call.data.split(":")
+    service_id = int(service_id)
+    pkg_id = int(pkg_id)
+
+    service = _get_owned_service(service_id, call.from_user.id)
+    if not service:
+        bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
+        return
+
+    pkg = db_execute(
+        "SELECT * FROM volume_packages WHERE id=? AND active=1",
+        (pkg_id,),
+        fetchone=True
+    )
+    if not pkg:
+        bot.answer_callback_query(call.id, "این بسته دیگر فعال نیست.", show_alert=True)
+        return
+
+    user = get_user(call.from_user.id)
+    if user["balance"] < pkg["price"]:
+        bot.answer_callback_query(
+            call.id,
+            f"❌ موجودی کافی نیست.\nموجودی: {user['balance']:,} | هزینه: {pkg['price']:,}",
+            show_alert=True
+        )
+        return
+
+    panel = _get_panel(service["panel_id"])
+    if not panel or not service["username"]:
+        bot.answer_callback_query(
+            call.id,
+            "❌ اطلاعات پنل این سرویس ناقص است.",
+            show_alert=True
+        )
+        return
+
+    result = pasarguard_apply_volume_increase(panel, service["username"], pkg["volume"])
+    if not result.get("success"):
+        bot.answer_callback_query(
+            call.id,
+            f"❌ افزایش حجم روی پنل ناموفق بود: {result.get('error')}",
+            show_alert=True
+        )
+        return
+
+    new_total_volume = round(result["data_limit_gb"], 2)
+
+    db_execute("UPDATE users SET balance=balance-? WHERE id=?", (pkg["price"], user["id"]))
+    db_execute("""
+    UPDATE services
+    SET volume=?, updated_at=?
+    WHERE id=?
+    """, (new_total_volume, now(), service_id))
+    db_execute("""
+    INSERT INTO transactions
+    (user_id, amount, type, description, reference, created_at)
+    VALUES (?, ?, 'debit', ?, ?, ?)
+    """, (user["id"], -pkg["price"], f"افزایش حجم ({pkg['name']})", f"increase:{service_id}", now()))
+    db_execute("""
+    INSERT INTO payments
+    (user_id, plan_id, amount, method, type, target_service_id,
+     extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'wallet_increase', 'increase', ?, ?, 'approved', ?, ?)
+    """, (
+        user["id"], service["plan_id"], pkg["price"], service_id, pkg["volume"], now(), now()
+    ))
+
+    bot.answer_callback_query(call.id, "✅ حجم با موفقیت اضافه شد.")
+    bot.send_message(
+        call.message.chat.id,
+        f"🎉 <b>افزایش حجم موفق</b>\n\n"
+        f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>"
+    )
+
+
+# ============================================================
+# INCREASE VOLUME — کارت به کارت (نیاز به تأیید ادمین)
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("inccard:"))
+def increase_card(call):
+    _, service_id, pkg_id = call.data.split(":")
+    service_id = int(service_id)
+    pkg_id = int(pkg_id)
+
+    service = _get_owned_service(service_id, call.from_user.id)
+    if not service:
+        bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
+        return
+
+    pkg = db_execute(
+        "SELECT * FROM volume_packages WHERE id=? AND active=1",
+        (pkg_id,),
+        fetchone=True
+    )
+    if not pkg:
+        bot.answer_callback_query(call.id, "این بسته دیگر فعال نیست.", show_alert=True)
+        return
+
+    card = get_setting("card_number", "")
+    holder = get_setting("card_holder", "")
+    if not card:
+        bot.answer_callback_query(call.id, "پرداخت کارت به کارت فعلاً تنظیم نشده.", show_alert=True)
+        return
+
+    text = (
+        "💳 <b>پرداخت کارت به کارت — افزایش حجم</b>\n\n"
+        f"🏷 بسته: {pkg['name']}\n"
+        f"➕ حجم: {pkg['volume']} GB\n"
+        f"💰 مبلغ: <b>{pkg['price']:,} تومان</b>\n\n"
+        f"💳 شماره کارت:\n<code>{card}</code>\n\n"
+        f"👤 به نام: <b>{holder or '---'}</b>\n\n"
+        "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
+    )
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+    bot.register_next_step_handler(call.message, receive_increase_receipt, service_id, pkg_id)
+
+
+def receive_increase_receipt(message, service_id, pkg_id):
+    if not message.photo:
+        sent = bot.send_message(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.")
+        bot.register_next_step_handler(sent, receive_increase_receipt, service_id, pkg_id)
+        return
+
+    service = _get_owned_service(service_id, message.from_user.id)
+    if not service:
+        bot.send_message(message.chat.id, "❌ سرویس پیدا نشد.")
+        return
+
+    pkg = db_execute(
+        "SELECT * FROM volume_packages WHERE id=?",
+        (pkg_id,),
+        fetchone=True
+    )
+    if not pkg:
+        bot.send_message(message.chat.id, "❌ بسته پیدا نشد.")
+        return
+
+    file_id = message.photo[-1].file_id
+    user_id = internal_user_id(message.from_user.id)
+
+    db_execute("""
+    INSERT INTO payments
+    (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
+     type, target_service_id, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'increase', ?, ?, 'pending', ?, ?)
+    """, (
+        user_id, service["plan_id"], pkg["price"], file_id,
+        service_id, pkg["volume"], now(), now()
+    ))
+
+    bot.send_message(
+        message.chat.id,
+        "✅ رسید شما ثبت شد.\n\n"
+        "⏳ درخواست افزایش حجم در انتظار بررسی مدیریت است."
+    )
+
+
+# ============================================================
+# APPLY MANUAL RENEW/INCREASE — بعد از تأیید ادمین صدا زده می‌شود
+# (این تابع از handlers_payment.py فراخوانی می‌شود)
+# ============================================================
+
+def apply_manual_renew_or_increase(payment):
+    service = db_execute("""
+    SELECT services.*, plans.panel_id AS panel_id
+    FROM services
+    LEFT JOIN plans ON plans.id=services.plan_id
+    WHERE services.id=?
+    """, (payment["target_service_id"],), fetchone=True)
+
+    if not service:
+        return False, "سرویس پیدا نشد"
+
+    user = db_execute(
+        "SELECT * FROM users WHERE id=?",
+        (payment["user_id"],),
+        fetchone=True
+    )
+
+    panel = _get_panel(service["panel_id"])
+    if not panel or not service["username"]:
+        return False, "اطلاعات پنل این سرویس ناقص است"
+
+    if payment["type"] == "renew":
+        result = pasarguard_apply_renewal(
+            panel, service["username"], payment["extra_volume"], payment["extra_days"]
+        )
+        if not result.get("success"):
+            return False, f"خطای پنل: {result.get('error')}"
+
+        new_total_volume = round(result["data_limit_gb"], 2)
+        new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
+
+        db_execute("""
+        UPDATE services
+        SET volume=?, used_volume=0, expires_at=?, status='active', updated_at=?
+        WHERE id=?
+        """, (new_total_volume, new_expiry, now(), service["id"]))
+
+        if user:
+            bot.send_message(
+                user["telegram_id"],
+                f"🎉 <b>تمدید سرویس تأیید شد!</b>\n\n"
+                f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>\n"
+                f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
+                parse_mode="HTML"
+            )
+        return True, "renewed"
+
+    if payment["type"] == "increase":
+        result = pasarguard_apply_volume_increase(
+            panel, service["username"], payment["extra_volume"]
+        )
+        if not result.get("success"):
+            return False, f"خطای پنل: {result.get('error')}"
+
+        new_total_volume = round(result["data_limit_gb"], 2)
+
+        db_execute("""
+        UPDATE services
+        SET volume=?, updated_at=?
+        WHERE id=?
+        """, (new_total_volume, now(), service["id"]))
+
+        if user:
+            bot.send_message(
+                user["telegram_id"],
+                f"🎉 <b>افزایش حجم تأیید شد!</b>\n\n"
+                f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>",
+                parse_mode="HTML"
+            )
+        return True, "increased"
+
+    return False, "نوع پرداخت نامعتبر"
