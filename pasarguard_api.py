@@ -4,7 +4,9 @@
 # پکیج پایتون: pip install pasarguard   (https://pypi.org/project/pasarguard/)
 # ============================================================
 import re
+import time
 import asyncio
+from datetime import datetime
 from pasarguard import PasarguardAPI, Tools, UserCreate, UserModify, UserStatus
 
 VERIFY_SSL = True
@@ -142,7 +144,6 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
         current_limit_gb = (getattr(current, "data_limit", 0) or 0) / (1024 ** 3)
         new_limit_gb = current_limit_gb + float(add_volume_gb)
 
-        import time
         current_expire = getattr(current, "expire", None)
         base_ts = current_expire if current_expire and current_expire > int(time.time()) else int(time.time())
         new_expire_ts = base_ts + int(add_days) * 86400
@@ -206,6 +207,44 @@ async def _apply_volume_increase_async(panel, username, add_volume_gb):
         }
 
 
+async def _delete_service_async(panel, username):
+    """
+    حذف کامل کاربر از روی پنل.
+    نام متد حذف بین نسخه‌های مختلف SDK پاسارگارد فرق دارد،
+    بنابراین رایج‌ترین نام‌های ممکن را به ترتیب امتحان می‌کنیم.
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+
+        delete_fn = (
+            getattr(api, "remove_user_by_username", None)
+            or getattr(api, "delete_user_by_username", None)
+            or getattr(api, "remove_user", None)
+            or getattr(api, "delete_user", None)
+        )
+        if not delete_fn:
+            return {
+                "success": False,
+                "error": (
+                    "متد حذف کاربر در SDK پیدا نشد. "
+                    "برای پیدا کردن نام درست متد این دستور را اجرا کنید: "
+                    "python3 -c \"from pasarguard import PasarguardAPI; "
+                    "print([m for m in dir(PasarguardAPI) if 'user' in m.lower()])\""
+                ),
+            }
+
+        await delete_fn(username=username, token=token.access_token)
+        return {"success": True, "error": ""}
+
+
 # ============================================================
 # SYNC WRAPPERS (used by the rest of the bot)
 # ============================================================
@@ -263,5 +302,15 @@ def pasarguard_apply_volume_increase(panel, username, add_volume_gb):
         return asyncio.run(
             _apply_volume_increase_async(panel, username, add_volume_gb)
         )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def pasarguard_delete_service(panel, username):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
+    try:
+        return asyncio.run(_delete_service_async(panel, username))
     except Exception as e:
         return {"success": False, "error": str(e)}
