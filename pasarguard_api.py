@@ -141,8 +141,14 @@ async def _get_user_usage_async(panel, username):
 
 async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
     """
-    تمدید روی خود پنل: حجم کل و تاریخ انقضا با مقدار جدید (فعلی + اضافه‌شده)
-    به‌روزرسانی می‌شود، سپس مصرف کاربر روی پنل صفر می‌شود.
+    تمدید روی خود پنل: فقط سقف حجم (data_limit) و تاریخ انقضا بالا
+    برده می‌شود. مصرف قبلی کاربر عمداً صفر نمی‌شود، چون هدف این است که:
+        باقیمانده‌ی جدید = باقیمانده‌ی قبلی + حجم پلن تمدید
+    مثال: پلن ۵ گیگ/۳۰ روز، کاربر ۲ گیگ مصرف کرده (۳ گیگ باقیمانده).
+    بعد از تمدید باید ۸ گیگ باقیمانده داشته باشد (۳ + ۵)، نه ۱۰ گیگ تازه.
+    چون مصرف صفر نمی‌شود و فقط سقف بالا می‌رود، این محاسبه خودکار درست
+    از آب در می‌آید: سقف جدید = سقف قدیم + پلن = ۱۰، مصرف = همان ۲،
+    باقیمانده = ۱۰ - ۲ = ۸. ✅
     """
     base_url = _normalize_url(panel["url"])
     async with PasarguardAPI(
@@ -176,11 +182,7 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
             token=token.access_token,
         )
 
-        # مصرف روی پنل باید جدا صفر شود؛ UserModify فیلد used_traffic ندارد
-        await api.reset_user_data_usage_by_username(
-            username=username,
-            token=token.access_token,
-        )
+        # عمداً مصرف را صفر نمی‌کنیم — دلیل در docstring بالا توضیح داده شد
 
         return {
             "success": True,
