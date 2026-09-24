@@ -336,9 +336,20 @@ def _get_user_services(telegram_id):
 
 
 def _get_panel_for_service(service):
-    if not service.get("panel_id"):
+    """
+    service یک sqlite3.Row است، نه دیکشنری معمولی — پس .get() ندارد.
+    برای دسترسی امن به ستونی که ممکن است NULL باشد یا اصلاً در
+    نتیجه‌ی کوئری نباشد، از try/except استفاده می‌کنیم.
+    """
+    try:
+        panel_id = service["panel_id"]
+    except (KeyError, IndexError):
         return None
-    return db_execute("SELECT * FROM panels WHERE id=?", (service["panel_id"],), fetchone=True)
+
+    if not panel_id:
+        return None
+
+    return db_execute("SELECT * FROM panels WHERE id=?", (panel_id,), fetchone=True)
 
 
 # ============================================================
