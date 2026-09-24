@@ -172,7 +172,7 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
         )
         await api.modify_user_by_username(
             username=username,
-            body=modify,
+            user=modify,
             token=token.access_token,
         )
 
@@ -214,7 +214,7 @@ async def _apply_volume_increase_async(panel, username, add_volume_gb):
         )
         await api.modify_user_by_username(
             username=username,
-            body=modify,
+            user=modify,
             token=token.access_token,
         )
         return {
