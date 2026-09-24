@@ -192,25 +192,19 @@ def init_db():
             """)
 
         # ====================================================
-        # RENEWAL PLANS
-        # پلن‌های تمدید — کاملاً مستقل از پلن‌های خرید
+        # VOLUME PACKAGES
+        # بسته‌های افزایش حجم — هر بسته: نام + حجم + قیمت دلخواه
         # ====================================================
 
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS renewal_plans (
+        CREATE TABLE IF NOT EXISTS volume_packages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            price INTEGER NOT NULL,
-            duration INTEGER NOT NULL,
             volume INTEGER NOT NULL,
-            panel_id INTEGER,
+            price INTEGER NOT NULL,
             active INTEGER DEFAULT 1,
             sort_order INTEGER DEFAULT 0,
-            created_at TEXT,
-            FOREIGN KEY(panel_id)
-                REFERENCES panels(id)
-                ON DELETE SET NULL
+            created_at TEXT
         )
         """)
 
@@ -310,7 +304,7 @@ def init_db():
             ADD COLUMN target_service_id INTEGER
             """)
 
-        # مقدار گیگ اضافه‌شده در حالت افزایش حجم
+        # مقدار گیگ اضافه‌شده در حالت افزایش حجم یا تمدید
         if "extra_volume" not in payment_columns:
 
             cur.execute("""
@@ -324,14 +318,6 @@ def init_db():
             cur.execute("""
             ALTER TABLE payments
             ADD COLUMN extra_days INTEGER DEFAULT 0
-            """)
-
-        # پلن تمدیدی که برای این پرداخت انتخاب شده (در صورت استفاده از renewal_plans)
-        if "renewal_plan_id" not in payment_columns:
-
-            cur.execute("""
-            ALTER TABLE payments
-            ADD COLUMN renewal_plan_id INTEGER
             """)
 
         # ====================================================
@@ -513,9 +499,6 @@ def init_db():
             "trial_duration": "1",
             "trial_devices": "1",
             "trial_limit": "1",
-
-            # Renewal / Volume increase
-            "extra_gb_price": "5000",
 
             # Support
             "support_username": "",
