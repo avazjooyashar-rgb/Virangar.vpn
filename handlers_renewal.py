@@ -2,6 +2,8 @@
 # handlers_renewal.py
 # تمدید سرویس و افزایش حجم — همیشه اول روی پنل PasarGuard اعمال
 # می‌شود و فقط در صورت موفقیت پنل، دیتابیس داخلی آپدیت می‌شود.
+# مصرف قبلی هنگام تمدید صفر نمی‌شود؛ باقیمانده‌ی جدید = باقیمانده‌ی
+# قبلی + حجم پلن تمدید (طبق منطقی که در pasarguard_api.py پیاده شده).
 # ============================================================
 from datetime import datetime, timedelta
 
@@ -67,17 +69,19 @@ def renew_service(call):
         )
         return
 
-    new_total_volume = service["volume"] + service["plan_volume"]
+    current_remaining = max(0, service["volume"] - service["used_volume"])
+    new_remaining_estimate = current_remaining + service["plan_volume"]
 
     text = (
         "🔄 <b>تمدید سرویس</b>\n\n"
         f"📦 پلن: {service['plan_name']}\n"
-        f"➕ حجم اضافه‌شونده: {service['plan_volume']} GB "
-        f"(حجم کل بعد از تمدید: {new_total_volume} GB)\n"
+        f"➕ حجم اضافه‌شونده: {service['plan_volume']} GB\n"
+        f"📊 باقیمانده فعلی: {current_remaining} GB\n"
+        f"📊 باقیمانده بعد از تمدید: تقریباً {new_remaining_estimate} GB\n"
         f"⏳ مدت اضافه‌شونده: {service['plan_duration']} روز\n"
         f"💰 هزینه: {service['plan_price']:,} تومان\n\n"
-        "با تمدید، این مقدار حجم و زمان به سرویس فعلی اضافه می‌شود "
-        "و مصرف روی پنل صفر خواهد شد.\n\n"
+        "با تمدید، این مقدار حجم و زمان به سرویس فعلی اضافه می‌شود.\n"
+        "مصرف قبلی شما صفر نمی‌شود؛ فقط سقف حجم بالا می‌رود.\n\n"
         "روش پرداخت را انتخاب کنید:"
     )
     kb = types.InlineKeyboardMarkup()
@@ -148,7 +152,7 @@ def renew_wallet(call):
     db_execute("UPDATE users SET balance=balance-? WHERE id=?", (price, user["id"]))
     db_execute("""
     UPDATE services
-    SET volume=?, used_volume=0, expires_at=?, status='active', updated_at=?
+    SET volume=?, expires_at=?, status='active', updated_at=?
     WHERE id=?
     """, (new_total_volume, new_expiry, now(), service_id))
     db_execute("""
@@ -166,12 +170,15 @@ def renew_wallet(call):
         service["plan_duration"], service["plan_volume"], now(), now()
     ))
 
+    remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
+
     bot.answer_callback_query(call.id, "✅ سرویس با موفقیت تمدید شد.")
     bot.send_message(
         call.message.chat.id,
         f"🎉 <b>تمدید موفق</b>\n\n"
         f"📦 پلن: {service['plan_name']}\n"
-        f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>\n"
+        f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+        f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
         f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
         parse_mode="HTML"
     )
@@ -412,7 +419,7 @@ def increase_wallet(call):
     bot.send_message(
         call.message.chat.id,
         f"🎉 <b>افزایش حجم موفق</b>\n\n"
-        f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>"
+        f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>"
     )
 
 
@@ -538,15 +545,18 @@ def apply_manual_renew_or_increase(payment):
 
         db_execute("""
         UPDATE services
-        SET volume=?, used_volume=0, expires_at=?, status='active', updated_at=?
+        SET volume=?, expires_at=?, status='active', updated_at=?
         WHERE id=?
         """, (new_total_volume, new_expiry, now(), service["id"]))
+
+        remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
         if user:
             bot.send_message(
                 user["telegram_id"],
                 f"🎉 <b>تمدید سرویس تأیید شد!</b>\n\n"
-                f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>\n"
+                f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+                f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
                 f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
                 parse_mode="HTML"
             )
@@ -571,7 +581,7 @@ def apply_manual_renew_or_increase(payment):
             bot.send_message(
                 user["telegram_id"],
                 f"🎉 <b>افزایش حجم تأیید شد!</b>\n\n"
-                f"📊 حجم کل جدید: <code>{new_total_volume} GB</code>",
+                f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>",
                 parse_mode="HTML"
             )
         return True, "increased"
