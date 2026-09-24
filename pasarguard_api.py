@@ -3,22 +3,9 @@
 # اتصال واقعی به پنل PasarGuard با استفاده از SDK رسمی
 # پکیج پایتون: pip install pasarguard   (https://pypi.org/project/pasarguard/)
 # ============================================================
-#
-# نکات مهم:
-# 1) یوزر/پسوردی که موقع افزودن پنل وارد می‌کنید باید مربوط به
-#    یک ادمین «sudo» در پنل PasarGuard باشد، نه یک اپراتور محدود؛
-#    چون برای اضافه‌کردن کاربر به همه‌ی گروه‌ها به دسترسی کامل نیاز است.
-# 2) کاربر تازه‌ساخته‌شده با create_user_in_all_groups به تمام
-#    گروه‌ها (و در نتیجه هاست‌هایی که روی پنل تعریف کرده‌اید) اضافه می‌شود.
-# 3) اگر ارتباط SSL پنل گواهی معتبر ندارد (self-signed)، مقدار
-#    VERIFY_SSL را در همین فایل False کنید.
-# 4) پنل PasarGuard نقطه (.) را در یوزرنیم قبول نمی‌کند، پس نام
-#    دلخواه کاربر (مثلاً virangarvpn.ali) قبل از ارسال به پنل به
-#    virangarvpn_ali تبدیل می‌شود.
-# ============================================================
 import re
 import asyncio
-from pasarguard import PasarguardAPI, Tools, UserCreate, UserStatus
+from pasarguard import PasarguardAPI, Tools, UserCreate, UserModify, UserStatus
 
 VERIFY_SSL = True
 REQUEST_TIMEOUT = 20.0
@@ -40,10 +27,6 @@ def _panel_credentials_ok(panel):
 
 
 def _sanitize_username(raw):
-    """
-    یوزرنیم پنل باید فقط شامل حروف/عدد/آندرلاین باشد.
-    نقطه و کاراکترهای غیرمجاز با _ جایگزین می‌شوند.
-    """
     cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", raw or "")
     cleaned = cleaned.strip("_")
     return cleaned or None
@@ -90,10 +73,6 @@ async def _create_service_async(panel, telegram_user, plan, desired_username=Non
                 prefix=f"tg{telegram_user['telegram_id']}"
             )
 
-        # نکته: اینجا از int() استفاده نمی‌کنیم چون حجم می‌تواند
-        # اعشاری هم باشد (مثلاً 0.5 گیگ برای تست رایگان). با int()
-        # مقادیر کمتر از 1 به صفر رند می‌شدند و پنل PasarGuard
-        # data_limit=0 را «نامحدود» تفسیر می‌کند.
         user_create = UserCreate(
             username=username,
             data_limit=Tools.gb(float(plan["volume"])),
@@ -117,50 +96,172 @@ async def _create_service_async(panel, telegram_user, plan, desired_username=Non
         }
 
 
+async def _get_user_usage_async(panel, username):
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+        user = await api.get_user_by_username(
+            username=username,
+            token=token.access_token,
+        )
+        used_bytes = getattr(user, "used_traffic", 0) or 0
+        data_limit_bytes = getattr(user, "data_limit", 0) or 0
+        return {
+            "success": True,
+            "error": "",
+            "used_gb": used_bytes / (1024 ** 3),
+            "data_limit_gb": data_limit_bytes / (1024 ** 3) if data_limit_bytes else 0,
+            "status": str(getattr(user, "status", "")),
+        }
+
+
+async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
+    """
+    تمدید روی خود پنل: حجم کل و تاریخ انقضا با مقدار جدید (فعلی + اضافه‌شده)
+    به‌روزرسانی می‌شود، سپس مصرف کاربر روی پنل صفر می‌شود.
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+        current = await api.get_user_by_username(username=username, token=token.access_token)
+
+        current_limit_gb = (getattr(current, "data_limit", 0) or 0) / (1024 ** 3)
+        new_limit_gb = current_limit_gb + float(add_volume_gb)
+
+        import time
+        current_expire = getattr(current, "expire", None)
+        base_ts = current_expire if current_expire and current_expire > int(time.time()) else int(time.time())
+        new_expire_ts = base_ts + int(add_days) * 86400
+
+        modify = UserModify(
+            data_limit=Tools.gb(new_limit_gb),
+            expire=new_expire_ts,
+            status=UserStatus.ACTIVE,
+        )
+        await api.modify_user_by_username(
+            username=username,
+            body=modify,
+            token=token.access_token,
+        )
+
+        # مصرف روی پنل باید جدا صفر شود؛ UserModify فیلد used_traffic ندارد
+        await api.reset_user_data_usage_by_username(
+            username=username,
+            token=token.access_token,
+        )
+
+        return {
+            "success": True,
+            "error": "",
+            "data_limit_gb": new_limit_gb,
+            "expire": new_expire_ts,
+        }
+
+
+async def _apply_volume_increase_async(panel, username, add_volume_gb):
+    """
+    افزایش حجم روی خود پنل، بدون تغییر تاریخ انقضا یا صفر کردن مصرف.
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+        current = await api.get_user_by_username(username=username, token=token.access_token)
+
+        current_limit_gb = (getattr(current, "data_limit", 0) or 0) / (1024 ** 3)
+        new_limit_gb = current_limit_gb + float(add_volume_gb)
+
+        modify = UserModify(
+            data_limit=Tools.gb(new_limit_gb),
+        )
+        await api.modify_user_by_username(
+            username=username,
+            body=modify,
+            token=token.access_token,
+        )
+        return {
+            "success": True,
+            "error": "",
+            "data_limit_gb": new_limit_gb,
+        }
+
+
 # ============================================================
 # SYNC WRAPPERS (used by the rest of the bot)
 # ============================================================
 def pasarguard_test_panel(panel):
-    """
-    تست واقعی اتصال: گرفتن توکن ادمین از پنل و خواندن اطلاعات
-    ادمین لاگین‌شده.
-    """
     panel = dict(panel)
     if not _panel_credentials_ok(panel):
-        return {
-            "success": False,
-            "error": "آدرس/یوزرنیم/پسورد پنل کامل نیست."
-        }
+        return {"success": False, "error": "آدرس/یوزرنیم/پسورد پنل کامل نیست."}
     try:
         return asyncio.run(_test_panel_async(panel))
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def pasarguard_create_service(panel, telegram_user, plan, desired_username=None):
-    """
-    ساخت واقعی کاربر روی پنل PasarGuard و دریافت لینک اشتراک (subscription).
-    اگر desired_username داده شود، همان (پس از پاکسازی) به‌عنوان
-    یوزرنیم نهایی روی پنل استفاده می‌شود؛ در غیر این صورت یک یوزرنیم
-    تصادفی ساخته می‌شود.
-    """
     panel = dict(panel)
     telegram_user = dict(telegram_user)
     plan = dict(plan)
     if not _panel_credentials_ok(panel):
-        return {
-            "success": False,
-            "error": "اطلاعات اتصال پنل (URL/Username/Password) کامل نیست."
-        }
+        return {"success": False, "error": "اطلاعات اتصال پنل (URL/Username/Password) کامل نیست."}
     try:
         return asyncio.run(
             _create_service_async(panel, telegram_user, plan, desired_username)
         )
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
+
+
+def pasarguard_get_user_usage(panel, username):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
+    try:
+        return asyncio.run(_get_user_usage_async(panel, username))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def pasarguard_apply_renewal(panel, username, add_volume_gb, add_days):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
+    try:
+        return asyncio.run(
+            _apply_renewal_async(panel, username, add_volume_gb, add_days)
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def pasarguard_apply_volume_increase(panel, username, add_volume_gb):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
+    try:
+        return asyncio.run(
+            _apply_volume_increase_async(panel, username, add_volume_gb)
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
