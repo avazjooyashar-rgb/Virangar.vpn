@@ -197,6 +197,28 @@ def receive_username(message, plan_id):
         return
 
     username = f"{USERNAME_PREFIX}{raw}"
+
+    # ---- چک تکراری نبودن یوزرنیم قبل از رفتن به مرحله پرداخت ----
+    existing_service = db_execute(
+        "SELECT id FROM services WHERE username=?",
+        (username,),
+        fetchone=True
+    )
+    existing_pending_payment = db_execute(
+        "SELECT id FROM payments WHERE custom_username=? AND status='pending'",
+        (username,),
+        fetchone=True
+    )
+
+    if existing_service or existing_pending_payment:
+        sent = bot.send_message(
+            message.chat.id,
+            "❌ این نام قبلاً استفاده شده یا در انتظار تأیید یک پرداخت دیگر است.\n\n"
+            "لطفاً یک نام دیگر انتخاب کنید:"
+        )
+        bot.register_next_step_handler(sent, receive_username, plan_id)
+        return
+
     show_payment_methods(message.chat.id, message.from_user.id, plan, username)
 
 
