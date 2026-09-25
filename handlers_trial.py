@@ -11,7 +11,7 @@ from datetime import date
 from telebot import types
 
 from config import bot
-from database import db_execute, get_setting, set_setting
+from database import db_execute, get_setting, set_setting, now
 from models import get_user, is_admin
 from pasarguard_api import pasarguard_create_service
 from services import create_local_service
@@ -30,16 +30,39 @@ GENERIC_ERROR_MESSAGE = "❌ خطایی رخ داد، لطفاً دوباره ت
 # ============================================================
 
 def count_user_trials(user_id):
+    """
+    تعداد تست‌های رایگانی که این کاربر تا الان گرفته را از جدول
+    مستقل trial_usage می‌شمارد، نه از جدول services.
+    دلیل: اگر کاربر بعداً سرویس تست را حذف کند، رکورد آن از
+    services پاک می‌شود ولی نباید بتواند دوباره تست رایگان بگیرد.
+    trial_usage هیچ‌وقت با حذف سرویس پاک نمی‌شود.
+    """
     try:
         row = db_execute("""
-        SELECT COUNT(*) c FROM services
-        WHERE user_id=? AND plan_id IS NULL
+        SELECT COUNT(*) c FROM trial_usage
+        WHERE user_id=?
         """, (user_id,), fetchone=True)
 
         return row["c"] if row else 0
     except Exception:
         logger.exception("count_user_trials failed")
-        return 0
+        # در صورت خطا، برای احتیاط فرض می‌کنیم سقف استفاده شده تا
+        # جلوی سوءاستفاده احتمالی گرفته شود
+        return 999999
+
+
+def record_trial_usage(user_id, service_id=None):
+    """
+    ثبت دائمی این‌که این کاربر یک تست رایگان گرفته است. این رکورد
+    حتی اگر سرویس بعداً حذف شود، باقی می‌ماند.
+    """
+    try:
+        db_execute("""
+        INSERT INTO trial_usage (user_id, service_id, created_at)
+        VALUES (?, ?, ?)
+        """, (user_id, service_id, now()))
+    except Exception:
+        logger.exception("record_trial_usage failed")
 
 
 def username_taken(final_username):
@@ -377,6 +400,10 @@ def trial_confirm(call):
                 pass
             return
 
+        # ثبت دائمی این‌که کاربر تست رایگان گرفته — حتی اگر بعداً
+        # سرویس حذف شود، این رکورد باقی می‌ماند و جلوی تست دوباره را می‌گیرد
+        record_trial_usage(user["id"], service.get("id") if isinstance(service, dict) else None)
+
         # فقط بعد از موفقیت‌آمیز بودن ساخت سرویس، شمارنده‌ی روزانه افزایش پیدا می‌کند
         increment_today_trial_count()
 
@@ -465,6 +492,8 @@ def render_trial_settings(chat_id, message_id=None):
         )
 
         kb.add(types.InlineKeyboardButton(f"🖥 پنل تست: {panel_name}", callback_data="trialset:panel"))
+
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_main"))
 
         if message_id:
             if safe_edit_message(text, chat_id, message_id, reply_markup=kb):
