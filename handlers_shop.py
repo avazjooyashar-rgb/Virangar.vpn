@@ -299,24 +299,34 @@ def days_left(expires_at):
         return None
 
 
+def _safe_get(row, key, default=None):
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return value if value is not None else default
+
+
 def service_label(service):
     """
-    اسم نمایشی سرویس. اگر بعد از تمدید یا افزایش حجم یک پلن جدید
-    استفاده شده باشد، plan_label به‌روز شده اولویت دارد؛ در غیر
-    این صورت به نام پلن اصلی خرید یا «سرویس تست» برمی‌گردد.
+    برچسب نمایشی سرویس به‌صورت خودکار از روی «حجم کل فعلی» و
+    «مجموع روزهای خریداری‌شده» ساخته می‌شود، مثل «20GB 60روزه».
+    این عدد با هر تمدید یا افزایش حجم به‌روز می‌ماند، چون هم
+    volume و هم total_duration_days هرکدام جمع‌شونده هستند.
+    اگر سرویس تست باشد (بدون پلن)، برچسب ثابت «سرویس تست» نمایش
+    داده می‌شود.
     """
-    try:
-        label = service["plan_label"]
-    except (KeyError, IndexError):
-        label = None
+    if not service["plan_id"]:
+        return "🎁 سرویس تست"
 
-    if label:
-        return label
+    volume = service["volume"]
+    total_duration = _safe_get(service, "total_duration_days")
 
-    if service["plan_name"]:
-        return service["plan_name"]
+    if total_duration is None:
+        # هنوز هیچ تمدیدی انجام نشده؛ از مدت پلن اصلی به‌عنوان مقدار پایه استفاده کن
+        total_duration = _safe_get(service, "plan_duration", 0)
 
-    return "🎁 سرویس تست"
+    return f"{volume}GB {total_duration}روزه"
 
 
 def _services_list_keyboard(services):
@@ -324,7 +334,7 @@ def _services_list_keyboard(services):
     for service in services:
         status_icon = "🟢" if service["status"] == "active" else "🔴"
         remaining_days = days_left(service["expires_at"])
-        days_str = f" | {remaining_days} روز" if remaining_days is not None else ""
+        days_str = f" | {remaining_days} روز مانده" if remaining_days is not None else ""
 
         kb.add(
             types.InlineKeyboardButton(
@@ -341,7 +351,7 @@ def _services_list_keyboard(services):
 def _get_user_services(telegram_id):
     user_id = internal_user_id(telegram_id)
     return db_execute("""
-    SELECT services.*, plans.name AS plan_name
+    SELECT services.*, plans.name AS plan_name, plans.duration AS plan_duration
     FROM services
     LEFT JOIN plans ON plans.id=services.plan_id
     WHERE services.user_id=?
@@ -457,7 +467,8 @@ def service_details(call):
     user_id = internal_user_id(call.from_user.id)
 
     service = db_execute("""
-    SELECT services.*, plans.name AS plan_name, plans.panel_id AS panel_id
+    SELECT services.*, plans.name AS plan_name, plans.panel_id AS panel_id,
+           plans.duration AS plan_duration
     FROM services
     LEFT JOIN plans ON plans.id=services.plan_id
     WHERE services.id=? AND services.user_id=?
@@ -586,7 +597,11 @@ def service_config(call):
 
 
 # ============================================================
-# حذف سرویس — با تأییدیه، از پنل و از دیتابیس
+# حذف سرویس — با تأییدیه
+# همیشه از دیتابیس محلی حذف می‌شود، صرف نظر از این‌که روی پنل
+# پیدا شود یا نه (ممکن است کاربر یا ادمین قبلاً از پنل حذفش کرده
+# باشد). تلاش برای حذف از پنل انجام می‌شود و اگر ناموفق بود فقط
+# به‌عنوان هشدار نمایش داده می‌شود، نه مانعی برای حذف محلی.
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delsvc_ask:"))
@@ -601,7 +616,8 @@ def delete_service_ask(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
         "⚠️ <b>حذف سرویس</b>\n\n"
-        "با تأیید، این سرویس هم از پنل و هم از لیست سرویس‌های شما برای همیشه حذف می‌شود.\n"
+        "با تأیید، این سرویس از لیست سرویس‌های شما حذف می‌شود "
+        "(اگر روی پنل هم هنوز فعال باشد، از آنجا نیز حذف می‌شود).\n"
         "این عمل قابل بازگشت نیست. آیا مطمئنید؟",
         call.message.chat.id,
         call.message.message_id,
@@ -626,17 +642,19 @@ def delete_service_confirm(call):
         bot.answer_callback_query(call.id, "سرویس پیدا نشد.", show_alert=True)
         return
 
+    panel_warning = ""
     panel = _get_panel_for_service(service)
     if panel and service["username"]:
         result = pasarguard_delete_service(panel, service["username"])
         if not result.get("success"):
-            bot.answer_callback_query(
-                call.id,
-                f"❌ حذف از پنل ناموفق بود: {result.get('error')}\nسرویس از لیست شما حذف نشد.",
-                show_alert=True
+            # از پنل حذف نشد (شاید از قبل روی پنل نبوده، یا پنل موقتاً
+            # در دسترس نیست) — این جلوی حذف محلی را نمی‌گیرد
+            panel_warning = (
+                f"\n\n⚠️ توجه: حذف از پنل انجام نشد ({result.get('error')})."
+                "\nاحتمالاً این سرویس از قبل روی پنل وجود نداشته است."
             )
-            return
 
+    # همیشه از دیتابیس محلی حذف می‌شود
     db_execute("DELETE FROM services WHERE id=?", (service_id,))
 
     bot.answer_callback_query(call.id, "✅ سرویس حذف شد.")
@@ -644,7 +662,7 @@ def delete_service_confirm(call):
     services = _get_user_services(call.from_user.id)
     if not services:
         bot.edit_message_text(
-            "📭 شما هیچ سرویسی ندارید.",
+            f"📭 شما هیچ سرویسی ندارید.{panel_warning}",
             call.message.chat.id,
             call.message.message_id
         )
@@ -652,8 +670,8 @@ def delete_service_confirm(call):
 
     kb = _services_list_keyboard(services)
     bot.edit_message_text(
-        "🛡 <b>سرویس‌های من</b>\n\n"
-        "یکی از سرویس‌های زیر را انتخاب کن:",
+        f"🛡 <b>سرویس‌های من</b>\n\n"
+        f"یکی از سرویس‌های زیر را انتخاب کن:{panel_warning}",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=kb,
