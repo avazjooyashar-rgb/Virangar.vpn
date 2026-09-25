@@ -2,11 +2,10 @@
 # handlers_renewal.py
 # تمدید سرویس و افزایش حجم — همیشه اول روی پنل PasarGuard اعمال
 # می‌شود و فقط در صورت موفقیت پنل، دیتابیس داخلی آپدیت می‌شود.
-# افزایش حجم اکنون دقیقاً مثل تمدید عمل می‌کند (هم حجم هم زمان اضافه
-# می‌شود) و از روی جدول renewal_plans (پلن‌های تمدید که ادمین در
-# بخش مدیریت پلن‌ها می‌سازد) خوانده می‌شود.
-# مصرف قبلی هنگام تمدید/افزایش صفر نمی‌شود؛ باقیمانده‌ی جدید =
-# باقیمانده‌ی قبلی + حجم پلن انتخابی.
+# افزایش حجم دقیقاً مثل تمدید عمل می‌کند (هم حجم هم زمان اضافه
+# می‌شود) و از روی جدول renewal_plans خوانده می‌شود.
+# بعد از هر تمدید/افزایش موفق، ستون plan_label سرویس با نام
+# آخرین پلن استفاده‌شده آپدیت می‌شود تا نام نمایشی سرویس درست بماند.
 # ============================================================
 from datetime import datetime, timedelta
 
@@ -51,6 +50,14 @@ def _extend_expiry(current_expiry, days):
     return (base + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _safe_get(row, key, default=None):
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return value if value is not None else default
+
+
 # ============================================================
 # RENEW — STEP 1: نمایش جزئیات و انتخاب روش پرداخت
 # ============================================================
@@ -92,7 +99,6 @@ def renew_service(call):
     if get_setting("manual_payment_enabled", "1") == "1":
         kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data=f"renewcard:{service_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"service:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
@@ -150,13 +156,14 @@ def renew_wallet(call):
 
     new_total_volume = round(panel_result["data_limit_gb"], 2)
     new_expiry = datetime.utcfromtimestamp(panel_result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
+    plan_label = service["plan_name"]
 
     db_execute("UPDATE users SET balance=balance-? WHERE id=?", (price, user["id"]))
     db_execute("""
     UPDATE services
-    SET volume=?, expires_at=?, status='active', updated_at=?
+    SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
     WHERE id=?
-    """, (new_total_volume, new_expiry, now(), service_id))
+    """, (new_total_volume, new_expiry, now(), plan_label, service_id))
     db_execute("""
     INSERT INTO transactions
     (user_id, amount, type, description, reference, created_at)
@@ -165,11 +172,11 @@ def renew_wallet(call):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, type, target_service_id,
-     extra_days, extra_volume, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'wallet_renew', 'renew', ?, ?, ?, 'approved', ?, ?)
+     extra_days, extra_volume, plan_label, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'wallet_renew', 'renew', ?, ?, ?, ?, 'approved', ?, ?)
     """, (
         user["id"], service["plan_id"], price, service_id,
-        service["plan_duration"], service["plan_volume"], now(), now()
+        service["plan_duration"], service["plan_volume"], plan_label, now(), now()
     ))
 
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
@@ -234,11 +241,12 @@ def receive_renew_receipt(message, service_id):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
-     type, target_service_id, extra_days, extra_volume, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'manual', ?, 'photo', 'renew', ?, ?, ?, 'pending', ?, ?)
+     type, target_service_id, extra_days, extra_volume, plan_label, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'renew', ?, ?, ?, ?, 'pending', ?, ?)
     """, (
         user_id, service["plan_id"], service["plan_price"], file_id,
-        service_id, service["plan_duration"], service["plan_volume"], now(), now()
+        service_id, service["plan_duration"], service["plan_volume"],
+        service["plan_name"], now(), now()
     ))
 
     bot.send_message(
@@ -249,7 +257,7 @@ def receive_renew_receipt(message, service_id):
 
 
 # ============================================================
-# INCREASE VOLUME — STEP 1: نمایش پلن‌های تمدید (از renewal_plans)
+# INCREASE VOLUME — STEP 1: نمایش پلن‌های افزایش حجم (از renewal_plans)
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("increase:") and call.data.count(":") == 1)
@@ -284,7 +292,6 @@ def increase_service(call):
             )
         )
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"service:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
@@ -335,7 +342,6 @@ def increase_package_selected(call):
     if get_setting("manual_payment_enabled", "1") == "1":
         kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data=f"inccard:{service_id}:{pkg_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"increase:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
@@ -349,7 +355,6 @@ def increase_package_selected(call):
 
 # ============================================================
 # INCREASE VOLUME — پرداخت از کیف پول (فوری)
-# افزایش حجم اکنون دقیقاً مثل تمدید عمل می‌کند
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("incwallet:"))
@@ -401,13 +406,14 @@ def increase_wallet(call):
 
     new_total_volume = round(result["data_limit_gb"], 2)
     new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
+    plan_label = pkg["name"]
 
     db_execute("UPDATE users SET balance=balance-? WHERE id=?", (pkg["price"], user["id"]))
     db_execute("""
     UPDATE services
-    SET volume=?, expires_at=?, status='active', updated_at=?
+    SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
     WHERE id=?
-    """, (new_total_volume, new_expiry, now(), service_id))
+    """, (new_total_volume, new_expiry, now(), plan_label, service_id))
     db_execute("""
     INSERT INTO transactions
     (user_id, amount, type, description, reference, created_at)
@@ -416,11 +422,11 @@ def increase_wallet(call):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, type, target_service_id,
-     extra_days, extra_volume, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'wallet_increase', 'increase', ?, ?, ?, 'approved', ?, ?)
+     extra_days, extra_volume, plan_label, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'wallet_increase', 'increase', ?, ?, ?, ?, 'approved', ?, ?)
     """, (
         user["id"], service["plan_id"], pkg["price"], service_id,
-        pkg["duration"], pkg["volume"], now(), now()
+        pkg["duration"], pkg["volume"], plan_label, now(), now()
     ))
 
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
@@ -507,11 +513,11 @@ def receive_increase_receipt(message, service_id, pkg_id):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
-     type, target_service_id, extra_days, extra_volume, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'manual', ?, 'photo', 'increase', ?, ?, ?, 'pending', ?, ?)
+     type, target_service_id, extra_days, extra_volume, plan_label, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'increase', ?, ?, ?, ?, 'pending', ?, ?)
     """, (
         user_id, service["plan_id"], pkg["price"], file_id,
-        service_id, pkg["duration"], pkg["volume"], now(), now()
+        service_id, pkg["duration"], pkg["volume"], pkg["name"], now(), now()
     ))
 
     bot.send_message(
@@ -546,6 +552,8 @@ def apply_manual_renew_or_increase(payment):
     if not panel or not service["username"]:
         return False, "اطلاعات پنل این سرویس ناقص است"
 
+    plan_label = _safe_get(payment, "plan_label")
+
     if payment["type"] == "renew":
         result = pasarguard_apply_renewal(
             panel, service["username"], payment["extra_volume"], payment["extra_days"]
@@ -555,12 +563,13 @@ def apply_manual_renew_or_increase(payment):
 
         new_total_volume = round(result["data_limit_gb"], 2)
         new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
+        final_label = plan_label or service["plan_name"]
 
         db_execute("""
         UPDATE services
-        SET volume=?, expires_at=?, status='active', updated_at=?
+        SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
         WHERE id=?
-        """, (new_total_volume, new_expiry, now(), service["id"]))
+        """, (new_total_volume, new_expiry, now(), final_label, service["id"]))
 
         remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
@@ -584,12 +593,13 @@ def apply_manual_renew_or_increase(payment):
 
         new_total_volume = round(result["data_limit_gb"], 2)
         new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
+        final_label = plan_label or service["plan_name"]
 
         db_execute("""
         UPDATE services
-        SET volume=?, expires_at=?, status='active', updated_at=?
+        SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
         WHERE id=?
-        """, (new_total_volume, new_expiry, now(), service["id"]))
+        """, (new_total_volume, new_expiry, now(), final_label, service["id"]))
 
         remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
