@@ -300,8 +300,22 @@ def days_left(expires_at):
 
 
 def service_label(service):
+    """
+    اسم نمایشی سرویس. اگر بعد از تمدید یا افزایش حجم یک پلن جدید
+    استفاده شده باشد، plan_label به‌روز شده اولویت دارد؛ در غیر
+    این صورت به نام پلن اصلی خرید یا «سرویس تست» برمی‌گردد.
+    """
+    try:
+        label = service["plan_label"]
+    except (KeyError, IndexError):
+        label = None
+
+    if label:
+        return label
+
     if service["plan_name"]:
         return service["plan_name"]
+
     return "🎁 سرویس تست"
 
 
