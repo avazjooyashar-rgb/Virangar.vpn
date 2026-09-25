@@ -1,6 +1,6 @@
 # ============================================================
 # admin_plans.py
-# مدیریت کامل پلن‌های VPN + پلن‌های تمدید توسط ادمین / سوپر ادمین
+# مدیریت کامل پلن‌های VPN + پلن‌های افزایش حجم توسط ادمین / سوپر ادمین
 # ============================================================
 
 import traceback
@@ -75,7 +75,7 @@ def plans_main_keyboard():
 
     kb.add(
         types.InlineKeyboardButton(
-            "🔄 پلن‌های تمدید",
+            "⚡️ پلن‌های افزایش حجم",
             callback_data="renewal_admin_home"
         )
     )
@@ -1559,8 +1559,10 @@ def plan_admin_home(call):
 
 # ============================================================
 # ============================================================
-# RENEWAL PLANS — مدیریت مستقل پلن‌های تمدید
+# VOLUME-INCREASE PLANS — مدیریت مستقل پلن‌های افزایش حجم
 # همون ساختار بالا، فقط روی جدول renewal_plans
+# (نام جدول و callback ها به دلایل سازگاری با کد قبلی renewal مانده،
+#  فقط متن‌های نمایشی به «افزایش حجم» تغییر کرده است)
 # ============================================================
 # ============================================================
 
@@ -1600,14 +1602,14 @@ def renewal_main_keyboard():
 
     kb.add(
         types.InlineKeyboardButton(
-            "➕ افزودن پلن تمدید",
+            "➕ افزودن پلن افزایش حجم",
             callback_data="renewal_admin_add"
         )
     )
 
     kb.add(
         types.InlineKeyboardButton(
-            "📋 لیست پلن‌های تمدید",
+            "📋 لیست پلن‌های افزایش حجم",
             callback_data="renewal_admin_list"
         )
     )
@@ -1623,7 +1625,7 @@ def renewal_main_keyboard():
 
 
 # ============================================================
-# RENEWAL — HOME
+# VOLUME-INCREASE — HOME
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_admin_home")
@@ -1639,12 +1641,12 @@ def renewal_admin_home(call):
         fetchall=True
     )
 
-    text = "🔄 <b>مدیریت پلن‌های تمدید</b>\n\n"
+    text = "⚡️ <b>مدیریت پلن‌های افزایش حجم</b>\n\n"
 
     if not plans:
-        text += "❌ هنوز هیچ پلن تمدیدی ساخته نشده است."
+        text += "❌ هنوز هیچ پلن افزایش حجمی ساخته نشده است."
     else:
-        text += f"📦 تعداد پلن‌های تمدید: <b>{len(plans)}</b>"
+        text += f"📦 تعداد پلن‌های افزایش حجم: <b>{len(plans)}</b>"
 
     bot.answer_callback_query(call.id)
 
@@ -1657,7 +1659,7 @@ def renewal_admin_home(call):
 
 
 # ============================================================
-# RENEWAL — ADD START
+# VOLUME-INCREASE — ADD START
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_admin_add")
@@ -1682,17 +1684,17 @@ def renewal_admin_add(call):
 
     bot.send_message(
         call.message.chat.id,
-        "➕ <b>افزودن پلن تمدید جدید</b>\n\n"
-        "🏷 نام پلن تمدید را وارد کنید:\n\n"
+        "⚡️ <b>افزودن پلن افزایش حجم جدید</b>\n\n"
+        "🏷 نام پلن افزایش حجم را وارد کنید:\n\n"
         "مثال:\n"
-        "<code>تمدید 1 ماهه 50GB</code>",
+        "<code>افزایش حجم 50GB</code>",
         reply_markup=renewal_back_keyboard(),
         parse_mode="HTML"
     )
 
 
 # ============================================================
-# RENEWAL — TEXT INPUT (WIZARD)
+# VOLUME-INCREASE — TEXT INPUT (WIZARD)
 # ============================================================
 
 @bot.message_handler(
@@ -1726,7 +1728,7 @@ def renewal_creation_handler(message):
             bot.send_message(
                 message.chat.id,
                 "❌ نام پلن نمی‌تواند خالی باشد.\n\n"
-                "🏷 دوباره نام پلن تمدید را وارد کنید:",
+                "🏷 دوباره نام پلن افزایش حجم را وارد کنید:",
                 reply_markup=renewal_back_keyboard()
             )
             return
@@ -1742,7 +1744,7 @@ def renewal_creation_handler(message):
 
         bot.send_message(
             message.chat.id,
-            "📝 توضیحات پلن تمدید را وارد کنید:\n\n"
+            "📝 توضیحات پلن افزایش حجم را وارد کنید:\n\n"
             "اگر نمی‌خواهید، عبارت <code>ندارد</code> را بفرستید.",
             reply_markup=renewal_back_keyboard(),
             parse_mode="HTML"
@@ -1805,8 +1807,8 @@ def renewal_creation_handler(message):
 
         bot.send_message(
             message.chat.id,
-            "📦 حجم کل سرویس بعد از تمدید را به GB وارد کنید:\n\n"
-            "(این عدد جایگزین حجم فعلی سرویس می‌شود)\n\n"
+            "📦 مقدار حجمی که با این پلن اضافه می‌شود را به GB وارد کنید:\n\n"
+            "(این عدد به حجم فعلی سرویس اضافه می‌شود، نه جایگزین آن)\n\n"
             "مثال: <code>50</code>",
             reply_markup=renewal_back_keyboard(),
             parse_mode="HTML"
@@ -1849,7 +1851,7 @@ def renewal_creation_handler(message):
 
         bot.send_message(
             message.chat.id,
-            "💰 قیمت این پلن تمدید را به تومان وارد کنید:\n\n"
+            "💰 قیمت این پلن افزایش حجم را به تومان وارد کنید:\n\n"
             "مثال: <code>180000</code>",
             reply_markup=renewal_back_keyboard(),
             parse_mode="HTML"
@@ -1894,7 +1896,7 @@ def renewal_creation_handler(message):
 
 
 # ============================================================
-# RENEWAL — PANEL SELECTION
+# VOLUME-INCREASE — PANEL SELECTION
 # ============================================================
 
 def show_renewal_panel_selection(chat_id):
@@ -1946,7 +1948,7 @@ def show_renewal_panel_selection(chat_id):
 
     bot.send_message(
         chat_id,
-        "🖥 <b>پنل مرتبط با این پلن تمدید را انتخاب کنید:</b>\n\n"
+        "🖥 <b>پنل مرتبط با این پلن افزایش حجم را انتخاب کنید:</b>\n\n"
         "فقط برای سرویس‌های همین پنل قابل استفاده خواهد بود.",
         reply_markup=kb,
         parse_mode="HTML"
@@ -1976,7 +1978,7 @@ def renewal_panel_selected(call):
     if not state:
         bot.answer_callback_query(
             call.id,
-            "❌ فرآیند افزودن پلن تمدید منقضی شده است."
+            "❌ فرآیند افزودن پلن افزایش حجم منقضی شده است."
         )
         return
 
@@ -2007,15 +2009,15 @@ def renewal_panel_selected(call):
     bot.send_message(
         call.message.chat.id,
         f"🖥 پنل انتخاب شد: <b>{panel['name']}</b>\n\n"
-        "⏳ مدت این پلن تمدید را به روز وارد کنید:\n\n"
-        "مثال: <code>30</code>",
+        "⏳ مدت این پلن افزایش حجم را به روز وارد کنید:\n\n"
+        "مثال: <code>15</code>",
         reply_markup=renewal_back_keyboard(),
         parse_mode="HTML"
     )
 
 
 # ============================================================
-# RENEWAL — PREVIEW
+# VOLUME-INCREASE — PREVIEW
 # ============================================================
 
 def send_renewal_preview(chat_id, user_id):
@@ -2029,13 +2031,13 @@ def send_renewal_preview(chat_id, user_id):
     description = data.get("description") or "ندارد"
 
     text = (
-        "👀 <b>پیش‌نمایش پلن تمدید</b>\n"
+        "⚡️ <b>پیش‌نمایش پلن افزایش حجم</b>\n"
         "━━━━━━━━━━━━━━\n\n"
         f"🏷 نام: <b>{data.get('name')}</b>\n\n"
         f"📝 توضیحات:\n{description}\n\n"
         f"🖥 پنل: <b>{data.get('panel_name', '---')}</b>\n"
-        f"⏳ مدت: <b>{data.get('duration')} روز</b>\n"
-        f"📦 حجم بعد از تمدید: <b>{data.get('volume')} GB</b>\n"
+        f"⏳ مدت اضافه‌شونده: <b>{data.get('duration')} روز</b>\n"
+        f"📦 حجم اضافه‌شونده: <b>{data.get('volume')} GB</b>\n"
         f"💰 قیمت: <b>{data.get('price'):,} تومان</b>\n\n"
         "━━━━━━━━━━━━━━\n"
         "آیا اطلاعات صحیح است؟"
@@ -2045,7 +2047,7 @@ def send_renewal_preview(chat_id, user_id):
 
     kb.add(
         types.InlineKeyboardButton(
-            "✅ ساخت پلن تمدید",
+            "✅ ساخت پلن افزایش حجم",
             callback_data="renewal_create_confirm"
         )
     )
@@ -2071,7 +2073,7 @@ def send_renewal_preview(chat_id, user_id):
 
 
 # ============================================================
-# RENEWAL — CREATE
+# VOLUME-INCREASE — CREATE
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_create_confirm")
@@ -2084,7 +2086,7 @@ def renewal_create_confirm(call):
     state = RENEWAL_CREATION.get(user_id)
 
     if not state:
-        bot.answer_callback_query(call.id, "❌ اطلاعات ساخت پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ اطلاعات ساخت پلن افزایش حجم پیدا نشد.")
         return
 
     data = state["data"]
@@ -2107,10 +2109,10 @@ def renewal_create_confirm(call):
             )
         )
     except Exception as e:
-        bot.answer_callback_query(call.id, "❌ خطا در ساخت پلن تمدید")
+        bot.answer_callback_query(call.id, "❌ خطا در ساخت پلن افزایش حجم")
         bot.send_message(
             call.message.chat.id,
-            "❌ <b>ساخت پلن تمدید انجام نشد.</b>\n\n"
+            "❌ <b>ساخت پلن افزایش حجم انجام نشد.</b>\n\n"
             f"<code>{str(e)}</code>",
             parse_mode="HTML",
             reply_markup=renewal_back_keyboard()
@@ -2119,11 +2121,11 @@ def renewal_create_confirm(call):
 
     clear_renewal_state(user_id)
 
-    bot.answer_callback_query(call.id, "✅ پلن تمدید ساخته شد")
+    bot.answer_callback_query(call.id, "✅ پلن افزایش حجم ساخته شد")
 
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("🔄 مدیریت پلن‌های تمدید", callback_data="renewal_admin_home")
+        types.InlineKeyboardButton("⚡️ مدیریت پلن‌های افزایش حجم", callback_data="renewal_admin_home")
     )
     kb.add(
         types.InlineKeyboardButton("🔙 بازگشت", callback_data="plan_admin_home")
@@ -2131,15 +2133,15 @@ def renewal_create_confirm(call):
 
     bot.send_message(
         call.message.chat.id,
-        "✅ <b>پلن تمدید با موفقیت ساخته شد.</b>\n\n"
-        f"🔄 {data['name']}",
+        "✅ <b>پلن افزایش حجم با موفقیت ساخته شد.</b>\n\n"
+        f"⚡️ {data['name']}",
         reply_markup=kb,
         parse_mode="HTML"
     )
 
 
 # ============================================================
-# RENEWAL — EDIT START / MENU
+# VOLUME-INCREASE — EDIT START / MENU
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_edit_start")
@@ -2152,7 +2154,7 @@ def renewal_edit_start(call):
     state = RENEWAL_CREATION.get(user_id)
 
     if not state:
-        bot.answer_callback_query(call.id, "❌ اطلاعات پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ اطلاعات پلن افزایش حجم پیدا نشد.")
         return
 
     state["step"] = "edit_menu"
@@ -2196,7 +2198,7 @@ def show_renewal_edit_menu(chat_id, user_id):
 
     bot.send_message(
         chat_id,
-        "✏️ <b>کدام قسمت پلن تمدید را می‌خواهید اصلاح کنید؟</b>",
+        "✏️ <b>کدام قسمت پلن افزایش حجم را می‌خواهید اصلاح کنید؟</b>",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -2225,10 +2227,10 @@ def renewal_edit_field(call):
     state["step"] = field
 
     prompts = {
-        "name": "🏷 نام جدید پلن تمدید را وارد کنید:",
+        "name": "🏷 نام جدید پلن افزایش حجم را وارد کنید:",
         "description": "📝 توضیحات جدید را وارد کنید:",
         "duration": "⏳ مدت جدید را به روز وارد کنید:",
-        "volume": "📦 حجم جدید بعد از تمدید را به GB وارد کنید:",
+        "volume": "📦 حجم اضافه‌شونده جدید را به GB وارد کنید:",
         "price": "💰 قیمت جدید را به تومان وارد کنید:",
     }
 
@@ -2274,7 +2276,7 @@ def renewal_edit_back(call):
 
 
 # ============================================================
-# RENEWAL — LIST
+# VOLUME-INCREASE — LIST
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_admin_list")
@@ -2292,14 +2294,14 @@ def renewal_admin_list(call):
 
     if not plans:
         kb.add(
-            types.InlineKeyboardButton("➕ افزودن پلن تمدید", callback_data="renewal_admin_add")
+            types.InlineKeyboardButton("➕ افزودن پلن افزایش حجم", callback_data="renewal_admin_add")
         )
     else:
         for plan in plans:
             status = "🟢" if plan["active"] else "🔴"
             kb.add(
                 types.InlineKeyboardButton(
-                    f"{status} {plan['name']}",
+                    f"{status} ⚡️ {plan['name']}",
                     callback_data=f"renewaladmin:{plan['id']}"
                 )
             )
@@ -2312,14 +2314,14 @@ def renewal_admin_list(call):
 
     bot.send_message(
         call.message.chat.id,
-        "📋 <b>لیست پلن‌های تمدید</b>",
+        "📋 <b>لیست پلن‌های افزایش حجم</b>",
         reply_markup=kb,
         parse_mode="HTML"
     )
 
 
 # ============================================================
-# RENEWAL — DETAILS
+# VOLUME-INCREASE — DETAILS
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renewaladmin:"))
@@ -2342,7 +2344,7 @@ def renewal_admin_details(call):
     )
 
     if not plan:
-        bot.answer_callback_query(call.id, "❌ پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ پلن افزایش حجم پیدا نشد.")
         return
 
     description = plan["description"] or "ندارد"
@@ -2350,12 +2352,12 @@ def renewal_admin_details(call):
     status = "🟢 فعال" if plan["active"] else "🔴 غیرفعال"
 
     text = (
-        f"🔄 <b>{plan['name']}</b>\n"
+        f"⚡️ <b>{plan['name']}</b>\n"
         "━━━━━━━━━━━━━━\n\n"
         f"📝 توضیحات:\n{description}\n\n"
         f"💰 قیمت: <b>{plan['price']:,} تومان</b>\n"
-        f"⏳ مدت: <b>{plan['duration']} روز</b>\n"
-        f"📦 حجم بعد از تمدید: <b>{plan['volume']} GB</b>\n"
+        f"⏳ مدت اضافه‌شونده: <b>{plan['duration']} روز</b>\n"
+        f"📦 حجم اضافه‌شونده: <b>{plan['volume']} GB</b>\n"
         f"🖥 پنل: <b>{panel_name}</b>\n"
         f"📌 وضعیت: <b>{status}</b>\n\n"
         "━━━━━━━━━━━━━━"
@@ -2395,7 +2397,7 @@ def renewal_admin_details(call):
 
 
 # ============================================================
-# RENEWAL — TOGGLE
+# VOLUME-INCREASE — TOGGLE
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renewal_toggle:"))
@@ -2413,7 +2415,7 @@ def renewal_toggle(call):
     )
 
     if not plan:
-        bot.answer_callback_query(call.id, "❌ پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ پلن افزایش حجم پیدا نشد.")
         return
 
     new_status = 0 if plan["active"] else 1
@@ -2431,7 +2433,7 @@ def renewal_toggle(call):
 
 
 # ============================================================
-# RENEWAL — DELETE
+# VOLUME-INCREASE — DELETE
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renewal_delete:"))
@@ -2449,7 +2451,7 @@ def renewal_delete(call):
     )
 
     if not plan:
-        bot.answer_callback_query(call.id, "❌ پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ پلن افزایش حجم پیدا نشد.")
         return
 
     kb = types.InlineKeyboardMarkup()
@@ -2465,8 +2467,8 @@ def renewal_delete(call):
 
     bot.send_message(
         call.message.chat.id,
-        f"⚠️ <b>حذف پلن تمدید</b>\n\n"
-        f"🔄 {plan['name']}\n\n"
+        f"⚠️ <b>حذف پلن افزایش حجم</b>\n\n"
+        f"⚡️ {plan['name']}\n\n"
         "آیا مطمئن هستید؟",
         reply_markup=kb,
         parse_mode="HTML"
@@ -2488,16 +2490,16 @@ def renewal_delete_confirm(call):
     )
 
     if not plan:
-        bot.answer_callback_query(call.id, "❌ پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ پلن افزایش حجم پیدا نشد.")
         return
 
     db_execute("DELETE FROM renewal_plans WHERE id=?", (renewal_id,))
 
-    bot.answer_callback_query(call.id, "✅ پلن تمدید حذف شد.")
+    bot.answer_callback_query(call.id, "✅ پلن افزایش حجم حذف شد.")
 
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("📋 لیست پلن‌های تمدید", callback_data="renewal_admin_list")
+        types.InlineKeyboardButton("📋 لیست پلن‌های افزایش حجم", callback_data="renewal_admin_list")
     )
     kb.add(
         types.InlineKeyboardButton("🔙 بازگشت", callback_data="renewal_admin_home")
@@ -2505,13 +2507,13 @@ def renewal_delete_confirm(call):
 
     bot.send_message(
         call.message.chat.id,
-        "✅ پلن تمدید با موفقیت حذف شد.",
+        "✅ پلن افزایش حجم با موفقیت حذف شد.",
         reply_markup=kb
     )
 
 
 # ============================================================
-# RENEWAL — EDIT EXISTING
+# VOLUME-INCREASE — EDIT EXISTING
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("renewal_edit:"))
@@ -2529,7 +2531,7 @@ def renewal_edit_existing(call):
     )
 
     if not plan:
-        bot.answer_callback_query(call.id, "❌ پلن تمدید پیدا نشد.")
+        bot.answer_callback_query(call.id, "❌ پلن افزایش حجم پیدا نشد.")
         return
 
     user_id = call.from_user.id
@@ -2562,7 +2564,7 @@ def renewal_edit_existing(call):
 
 
 # ============================================================
-# RENEWAL — SAVE EDIT
+# VOLUME-INCREASE — SAVE EDIT
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_save_edit")
@@ -2602,7 +2604,7 @@ def renewal_save_edit(call):
 
     clear_renewal_state(user_id)
 
-    bot.answer_callback_query(call.id, "✅ پلن تمدید ویرایش شد.")
+    bot.answer_callback_query(call.id, "✅ پلن افزایش حجم ویرایش شد.")
 
     fake_call = call
     fake_call.data = f"renewaladmin:{renewal_id}"
@@ -2610,7 +2612,7 @@ def renewal_save_edit(call):
 
 
 # ============================================================
-# RENEWAL — GENERAL BACK (با پشتیبانی از بازگشت مرحله‌به‌مرحله)
+# VOLUME-INCREASE — GENERAL BACK (با پشتیبانی از بازگشت مرحله‌به‌مرحله)
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_admin_back")
@@ -2645,14 +2647,14 @@ def renewal_admin_back(call):
             if previous == "name":
                 bot.send_message(
                     call.message.chat.id,
-                    "🏷 نام پلن تمدید را وارد کنید:",
+                    "🏷 نام پلن افزایش حجم را وارد کنید:",
                     reply_markup=renewal_back_keyboard()
                 )
 
             elif previous == "description":
                 bot.send_message(
                     call.message.chat.id,
-                    "📝 توضیحات پلن تمدید را وارد کنید:",
+                    "📝 توضیحات پلن افزایش حجم را وارد کنید:",
                     reply_markup=renewal_back_keyboard()
                 )
 
@@ -2662,28 +2664,26 @@ def renewal_admin_back(call):
             elif previous == "duration":
                 bot.send_message(
                     call.message.chat.id,
-                    "⏳ مدت پلن تمدید را به روز وارد کنید:",
+                    "⏳ مدت این پلن افزایش حجم را به روز وارد کنید:",
                     reply_markup=renewal_back_keyboard()
                 )
 
             elif previous == "volume":
                 bot.send_message(
                     call.message.chat.id,
-                    "📦 حجم بعد از تمدید را به GB وارد کنید:",
+                    "📦 حجم اضافه‌شونده را به GB وارد کنید:",
                     reply_markup=renewal_back_keyboard()
                 )
 
             elif previous == "price":
                 bot.send_message(
                     call.message.chat.id,
-                    "💰 قیمت پلن تمدید را به تومان وارد کنید:",
+                    "💰 قیمت این پلن افزایش حجم را به تومان وارد کنید:",
                     reply_markup=renewal_back_keyboard()
                 )
 
             return
 
-    # اینجاییم یعنی همون قدم اول (name) بودیم یا اصلاً در حال ساخت نبودیم
-    # => برگرد به منوی «پلن‌های تمدید»
     clear_renewal_state(user_id)
 
     bot.answer_callback_query(call.id)
@@ -2693,16 +2693,49 @@ def renewal_admin_back(call):
         fetchall=True
     )
 
-    text = "🔄 <b>مدیریت پلن‌های تمدید</b>\n\n"
+    text = "⚡️ <b>مدیریت پلن‌های افزایش حجم</b>\n\n"
 
     if not plans:
-        text += "❌ هنوز هیچ پلن تمدیدی ساخته نشده است."
+        text += "❌ هنوز هیچ پلن افزایش حجمی ساخته نشده است."
     else:
-        text += f"📦 تعداد پلن‌های تمدید: <b>{len(plans)}</b>"
+        text += f"📦 تعداد پلن‌های افزایش حجم: <b>{len(plans)}</b>"
 
     bot.send_message(
         call.message.chat.id,
         text,
         reply_markup=renewal_main_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# ADMIN MAIN — بازگشت به کیبورد اصلی پنل مدیریت
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_main")
+def admin_main_callback(call):
+
+    if not is_admin(call.from_user.id):
+        return
+
+    clear_state(call.from_user.id)
+
+    bot.answer_callback_query(call.id)
+
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    from keyboards import admin_keyboard
+
+    bot.send_message(
+        call.message.chat.id,
+        "👑 <b>پنل مدیریت VirangarVPN</b>",
+        reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
