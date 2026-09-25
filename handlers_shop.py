@@ -338,8 +338,6 @@ def _get_user_services(telegram_id):
 def _get_panel_for_service(service):
     """
     service یک sqlite3.Row است، نه دیکشنری معمولی — پس .get() ندارد.
-    برای دسترسی امن به ستونی که ممکن است NULL باشد یا اصلاً در
-    نتیجه‌ی کوئری نباشد، از try/except استفاده می‌کنیم.
     """
     try:
         panel_id = service["panel_id"]
@@ -430,14 +428,13 @@ def go_home(call):
     )
 
 
-# نگه‌داری نام قدیمی به‌عنوان مترادف، تا اگر جایی هنوز صداش می‌زند خطا نگیرید
 @bot.callback_query_handler(func=lambda call: call.data == "services_home_back")
 def services_home_back(call):
     go_home(call)
 
 
 # ============================================================
-# MY SERVICES — DETAILS (+ مصرف زنده از پنل)
+# MY SERVICES — DETAILS (+ مصرف زنده از پنل + دکمه بروزرسانی)
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("service:"))
@@ -524,20 +521,26 @@ def service_details(call):
         types.InlineKeyboardButton("🗑 حذف سرویس", callback_data=f"delsvc_ask:{service_id}")
     )
     kb.add(
-        types.InlineKeyboardButton("🔙 بازگشت به لیست سرویس‌ها", callback_data="services_back")
+        types.InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"service:{service_id}")
     )
     kb.add(
-        types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home")
+        types.InlineKeyboardButton("🔙 بازگشت به لیست سرویس‌ها", callback_data="services_back")
     )
 
     bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    try:
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        # اگر محتوا نسبت به قبل تغییری نکرده باشد، تلگرام خطای
+        # "message is not modified" می‌دهد که بی‌خطر است و باید نادیده گرفته شود
+        if "message is not modified" not in str(e):
+            raise
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("config:"))
@@ -557,7 +560,6 @@ def service_config(call):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"service:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     bot.send_message(
@@ -581,7 +583,6 @@ def delete_service_ask(call):
         types.InlineKeyboardButton("✅ بله، حذف کن", callback_data=f"delsvc_confirm:{service_id}"),
         types.InlineKeyboardButton("❌ انصراف", callback_data=f"service:{service_id}")
     )
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
