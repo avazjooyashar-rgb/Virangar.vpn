@@ -4,8 +4,8 @@
 # می‌شود و فقط در صورت موفقیت پنل، دیتابیس داخلی آپدیت می‌شود.
 # افزایش حجم دقیقاً مثل تمدید عمل می‌کند (هم حجم هم زمان اضافه
 # می‌شود) و از روی جدول renewal_plans خوانده می‌شود.
-# بعد از هر تمدید/افزایش موفق، ستون plan_label سرویس با نام
-# آخرین پلن استفاده‌شده آپدیت می‌شود تا نام نمایشی سرویس درست بماند.
+# بعد از هر تمدید/افزایش موفق، total_duration_days نیز جمع می‌شود
+# تا برچسب سرویس (مثل «20GB 60روزه») همیشه واقعی و به‌روز بماند.
 # ============================================================
 from datetime import datetime, timedelta
 
@@ -56,6 +56,18 @@ def _safe_get(row, key, default=None):
     except (KeyError, IndexError):
         return default
     return value if value is not None else default
+
+
+def _next_total_duration(service, added_days):
+    """
+    مجموع روزهای خریداری‌شده تا الان + روزهای این تمدید/افزایش.
+    اگر تا حالا هیچ تمدیدی انجام نشده (ستون خالی است)، از مدت
+    پلن اصلی خرید به‌عنوان مقدار پایه استفاده می‌شود.
+    """
+    current_total = _safe_get(service, "total_duration_days")
+    if current_total is None:
+        current_total = _safe_get(service, "plan_duration", 0)
+    return current_total + int(added_days)
 
 
 # ============================================================
@@ -156,14 +168,14 @@ def renew_wallet(call):
 
     new_total_volume = round(panel_result["data_limit_gb"], 2)
     new_expiry = datetime.utcfromtimestamp(panel_result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
-    plan_label = service["plan_name"]
+    new_total_duration = _next_total_duration(service, service["plan_duration"])
 
     db_execute("UPDATE users SET balance=balance-? WHERE id=?", (price, user["id"]))
     db_execute("""
     UPDATE services
-    SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
+    SET volume=?, expires_at=?, status='active', updated_at=?, total_duration_days=?
     WHERE id=?
-    """, (new_total_volume, new_expiry, now(), plan_label, service_id))
+    """, (new_total_volume, new_expiry, now(), new_total_duration, service_id))
     db_execute("""
     INSERT INTO transactions
     (user_id, amount, type, description, reference, created_at)
@@ -172,11 +184,11 @@ def renew_wallet(call):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, type, target_service_id,
-     extra_days, extra_volume, plan_label, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'wallet_renew', 'renew', ?, ?, ?, ?, 'approved', ?, ?)
+     extra_days, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'wallet_renew', 'renew', ?, ?, ?, 'approved', ?, ?)
     """, (
         user["id"], service["plan_id"], price, service_id,
-        service["plan_duration"], service["plan_volume"], plan_label, now(), now()
+        service["plan_duration"], service["plan_volume"], now(), now()
     ))
 
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
@@ -185,8 +197,7 @@ def renew_wallet(call):
     bot.send_message(
         call.message.chat.id,
         f"🎉 <b>تمدید موفق</b>\n\n"
-        f"📦 پلن: {service['plan_name']}\n"
-        f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+        f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
         f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
         f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
         parse_mode="HTML"
@@ -241,12 +252,11 @@ def receive_renew_receipt(message, service_id):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
-     type, target_service_id, extra_days, extra_volume, plan_label, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'manual', ?, 'photo', 'renew', ?, ?, ?, ?, 'pending', ?, ?)
+     type, target_service_id, extra_days, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'renew', ?, ?, ?, 'pending', ?, ?)
     """, (
         user_id, service["plan_id"], service["plan_price"], file_id,
-        service_id, service["plan_duration"], service["plan_volume"],
-        service["plan_name"], now(), now()
+        service_id, service["plan_duration"], service["plan_volume"], now(), now()
     ))
 
     bot.send_message(
@@ -406,14 +416,14 @@ def increase_wallet(call):
 
     new_total_volume = round(result["data_limit_gb"], 2)
     new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
-    plan_label = pkg["name"]
+    new_total_duration = _next_total_duration(service, pkg["duration"])
 
     db_execute("UPDATE users SET balance=balance-? WHERE id=?", (pkg["price"], user["id"]))
     db_execute("""
     UPDATE services
-    SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
+    SET volume=?, expires_at=?, status='active', updated_at=?, total_duration_days=?
     WHERE id=?
-    """, (new_total_volume, new_expiry, now(), plan_label, service_id))
+    """, (new_total_volume, new_expiry, now(), new_total_duration, service_id))
     db_execute("""
     INSERT INTO transactions
     (user_id, amount, type, description, reference, created_at)
@@ -422,11 +432,11 @@ def increase_wallet(call):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, type, target_service_id,
-     extra_days, extra_volume, plan_label, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'wallet_increase', 'increase', ?, ?, ?, ?, 'approved', ?, ?)
+     extra_days, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'wallet_increase', 'increase', ?, ?, ?, 'approved', ?, ?)
     """, (
         user["id"], service["plan_id"], pkg["price"], service_id,
-        pkg["duration"], pkg["volume"], plan_label, now(), now()
+        pkg["duration"], pkg["volume"], now(), now()
     ))
 
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
@@ -435,7 +445,7 @@ def increase_wallet(call):
     bot.send_message(
         call.message.chat.id,
         f"🎉 <b>افزایش حجم موفق</b>\n\n"
-        f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+        f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
         f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
         f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
         parse_mode="HTML"
@@ -513,11 +523,11 @@ def receive_increase_receipt(message, service_id, pkg_id):
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method, receipt_file_id, receipt_type,
-     type, target_service_id, extra_days, extra_volume, plan_label, status, created_at, updated_at)
-    VALUES (?, ?, ?, 'manual', ?, 'photo', 'increase', ?, ?, ?, ?, 'pending', ?, ?)
+     type, target_service_id, extra_days, extra_volume, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'manual', ?, 'photo', 'increase', ?, ?, ?, 'pending', ?, ?)
     """, (
         user_id, service["plan_id"], pkg["price"], file_id,
-        service_id, pkg["duration"], pkg["volume"], pkg["name"], now(), now()
+        service_id, pkg["duration"], pkg["volume"], now(), now()
     ))
 
     bot.send_message(
@@ -533,7 +543,7 @@ def receive_increase_receipt(message, service_id, pkg_id):
 
 def apply_manual_renew_or_increase(payment):
     service = db_execute("""
-    SELECT services.*, plans.panel_id AS panel_id
+    SELECT services.*, plans.panel_id AS panel_id, plans.duration AS plan_duration
     FROM services
     LEFT JOIN plans ON plans.id=services.plan_id
     WHERE services.id=?
@@ -552,8 +562,6 @@ def apply_manual_renew_or_increase(payment):
     if not panel or not service["username"]:
         return False, "اطلاعات پنل این سرویس ناقص است"
 
-    plan_label = _safe_get(payment, "plan_label")
-
     if payment["type"] == "renew":
         result = pasarguard_apply_renewal(
             panel, service["username"], payment["extra_volume"], payment["extra_days"]
@@ -563,13 +571,13 @@ def apply_manual_renew_or_increase(payment):
 
         new_total_volume = round(result["data_limit_gb"], 2)
         new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
-        final_label = plan_label or service["plan_name"]
+        new_total_duration = _next_total_duration(service, payment["extra_days"])
 
         db_execute("""
         UPDATE services
-        SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
+        SET volume=?, expires_at=?, status='active', updated_at=?, total_duration_days=?
         WHERE id=?
-        """, (new_total_volume, new_expiry, now(), final_label, service["id"]))
+        """, (new_total_volume, new_expiry, now(), new_total_duration, service["id"]))
 
         remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
@@ -577,7 +585,7 @@ def apply_manual_renew_or_increase(payment):
             bot.send_message(
                 user["telegram_id"],
                 f"🎉 <b>تمدید سرویس تأیید شد!</b>\n\n"
-                f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+                f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
                 f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
                 f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
                 parse_mode="HTML"
@@ -593,13 +601,13 @@ def apply_manual_renew_or_increase(payment):
 
         new_total_volume = round(result["data_limit_gb"], 2)
         new_expiry = datetime.utcfromtimestamp(result["expire"]).strftime("%Y-%m-%d %H:%M:%S")
-        final_label = plan_label or service["plan_name"]
+        new_total_duration = _next_total_duration(service, payment["extra_days"])
 
         db_execute("""
         UPDATE services
-        SET volume=?, expires_at=?, status='active', updated_at=?, plan_label=?
+        SET volume=?, expires_at=?, status='active', updated_at=?, total_duration_days=?
         WHERE id=?
-        """, (new_total_volume, new_expiry, now(), final_label, service["id"]))
+        """, (new_total_volume, new_expiry, now(), new_total_duration, service["id"]))
 
         remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
@@ -607,7 +615,7 @@ def apply_manual_renew_or_increase(payment):
             bot.send_message(
                 user["telegram_id"],
                 f"🎉 <b>افزایش حجم تأیید شد!</b>\n\n"
-                f"📊 سقف حجم جدید: <code>{new_total_volume} GB</code>\n"
+                f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
                 f"📊 باقیمانده فعلی: <code>{remaining_after} GB</code>\n"
                 f"📅 تاریخ انقضای جدید: <code>{new_expiry}</code>",
                 parse_mode="HTML"
