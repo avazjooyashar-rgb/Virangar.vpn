@@ -706,6 +706,13 @@ def plan_create_confirm(call):
 
     data = state["data"]
 
+    # پلن جدید همیشه در انتهای صف (بیشترین sort_order + 1) قرار می‌گیرد
+    max_order_row = db_execute(
+        "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM plans",
+        fetchone=True
+    )
+    next_order = (max_order_row["max_order"] if max_order_row else -1) + 1
+
     try:
         db_execute(
             """
@@ -724,7 +731,7 @@ def plan_create_confirm(call):
                 sort_order,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 data["name"],
@@ -736,6 +743,7 @@ def plan_create_confirm(call):
                 data.get("reseller_price", 0),
                 data.get("location", ""),
                 data["panel_id"],
+                next_order,
                 now()
             )
         )
@@ -936,15 +944,55 @@ def plan_edit_preview(call):
 
 
 # ============================================================
-# PLAN LIST
+# PLAN LIST (+ REORDER)
 # ============================================================
 
-@bot.callback_query_handler(func=lambda call: call.data == "plan_admin_list")
-def plan_admin_list(call):
+def _plan_list_keyboard(plans):
+    """
+    برای هر پلن، هم دکمه‌ی اصلی ورود به جزئیات (که نام و وضعیت را
+    نشان می‌دهد)، هم دو دکمه‌ی ⬆️/⬇️ برای جابه‌جایی ترتیب نمایش
+    ساخته می‌شود. جابه‌جایی فقط sort_order را عوض می‌کند و هیچ
+    تأثیری روی سرویس‌های متصل به این پلن ندارد.
+    """
+    kb = types.InlineKeyboardMarkup()
 
-    if not is_admin(call.from_user.id):
-        return
+    total = len(plans)
 
+    for index, plan in enumerate(plans):
+        status = "🟢" if plan["active"] else "🔴"
+
+        kb.add(
+            types.InlineKeyboardButton(
+                f"{status} {plan['name']}",
+                callback_data=f"planadmin:{plan['id']}"
+            )
+        )
+
+        move_row = []
+
+        if index > 0:
+            move_row.append(
+                types.InlineKeyboardButton(
+                    "⬆️",
+                    callback_data=f"plan_move_up:{plan['id']}"
+                )
+            )
+
+        if index < total - 1:
+            move_row.append(
+                types.InlineKeyboardButton(
+                    "⬇️",
+                    callback_data=f"plan_move_down:{plan['id']}"
+                )
+            )
+
+        if move_row:
+            kb.row(*move_row)
+
+    return kb
+
+
+def _render_plan_list(chat_id, message_id=None):
     plans = db_execute(
         """
         SELECT *
@@ -954,45 +1002,126 @@ def plan_admin_list(call):
         fetchall=True
     )
 
-    kb = types.InlineKeyboardMarkup()
-
     if not plans:
-
+        kb = types.InlineKeyboardMarkup()
         kb.add(
             types.InlineKeyboardButton(
                 "➕ افزودن پلن",
                 callback_data="plan_admin_add"
             )
         )
-
-    else:
-
-        for plan in plans:
-
-            status = "🟢" if plan["active"] else "🔴"
-
-            kb.add(
-                types.InlineKeyboardButton(
-                    f"{status} {plan['name']}",
-                    callback_data=f"planadmin:{plan['id']}"
-                )
+        kb.add(
+            types.InlineKeyboardButton(
+                "🔙 بازگشت",
+                callback_data="plan_admin_home"
             )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🔙 بازگشت",
-            callback_data="plan_admin_home"
         )
+    else:
+        kb = _plan_list_keyboard(plans)
+        kb.add(
+            types.InlineKeyboardButton(
+                "🔙 بازگشت",
+                callback_data="plan_admin_home"
+            )
+        )
+
+    text = (
+        "📋 <b>لیست پلن‌های VPN</b>\n\n"
+        "برای تغییر ترتیب نمایش پلن‌ها از دکمه‌های ⬆️ / ⬇️ استفاده کنید."
     )
 
-    bot.answer_callback_query(call.id)
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text,
+                chat_id,
+                message_id,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+            return
+        except Exception:
+            pass
 
     bot.send_message(
-        call.message.chat.id,
-        "📋 <b>لیست پلن‌های VPN</b>",
+        chat_id,
+        text,
         reply_markup=kb,
         parse_mode="HTML"
     )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "plan_admin_list")
+def plan_admin_list(call):
+
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.answer_callback_query(call.id)
+
+    _render_plan_list(call.message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_move_up:"))
+def plan_move_up(call):
+
+    if not is_admin(call.from_user.id):
+        return
+
+    plan_id = int(call.data.split(":")[1])
+
+    plans = db_execute(
+        "SELECT id, sort_order FROM plans ORDER BY sort_order ASC, id ASC",
+        fetchall=True
+    )
+
+    index = next((i for i, p in enumerate(plans) if p["id"] == plan_id), None)
+
+    if index is None or index == 0:
+        bot.answer_callback_query(call.id)
+        return
+
+    current = plans[index]
+    previous = plans[index - 1]
+
+    # جابه‌جایی sort_order بین این پلن و پلن بالایی‌اش
+    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (previous["sort_order"], current["id"]))
+    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (current["sort_order"], previous["id"]))
+
+    bot.answer_callback_query(call.id, "✅ جابه‌جا شد.")
+
+    _render_plan_list(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_move_down:"))
+def plan_move_down(call):
+
+    if not is_admin(call.from_user.id):
+        return
+
+    plan_id = int(call.data.split(":")[1])
+
+    plans = db_execute(
+        "SELECT id, sort_order FROM plans ORDER BY sort_order ASC, id ASC",
+        fetchall=True
+    )
+
+    index = next((i for i, p in enumerate(plans) if p["id"] == plan_id), None)
+
+    if index is None or index == len(plans) - 1:
+        bot.answer_callback_query(call.id)
+        return
+
+    current = plans[index]
+    next_plan = plans[index + 1]
+
+    # جابه‌جایی sort_order بین این پلن و پلن پایینی‌اش
+    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (next_plan["sort_order"], current["id"]))
+    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (current["sort_order"], next_plan["id"]))
+
+    bot.answer_callback_query(call.id, "✅ جابه‌جا شد.")
+
+    _render_plan_list(call.message.chat.id, call.message.message_id)
 
 
 # ============================================================
@@ -2710,10 +2839,6 @@ def renewal_admin_back(call):
 
 # ============================================================
 # ADMIN MAIN — بازگشت به کیبورد اصلی پنل مدیریت
-# پیام قبلی (که ممکن است اطلاعات حساس تنظیمات را داشته باشد)
-# کاملاً حذف می‌شود، نه فقط دکمه‌هایش. اگر حذف پیام به هر دلیلی
-# (مثلاً پیام قدیمی‌تر از ۴۸ ساعت) ممکن نبود، حداقل متن آن هم
-# پاک/خنثی می‌شود تا اطلاعاتی روی صفحه باقی نماند.
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_main")
