@@ -173,7 +173,8 @@ async def _get_user_usage_async(panel, username):
 async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
     """
     تمدید روی خود پنل: فقط سقف حجم (data_limit) و تاریخ انقضا بالا
-    برده می‌شود. مصرف قبلی کاربر عمداً صفر نمی‌شود.
+    برده می‌شود. مصرف قبلی کاربر عمداً صفر نمی‌شود، چون هدف این است که
+    باقیمانده‌ی جدید = باقیمانده‌ی قبلی + حجم پلن تمدید باشد.
     """
     base_url = _normalize_url(panel["url"])
     async with PasarguardAPI(
