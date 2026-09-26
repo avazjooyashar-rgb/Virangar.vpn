@@ -2,6 +2,7 @@
 # admin_panels.py
 # مدیریت پنل‌های PasarGuard: افزودن، لیست، تست، فعال/غیرفعال، حذف
 # + ویرایش نام/ظرفیت، نمایش و جابجایی پلن‌های هر پنل، تست دسته‌جمعی، صفحه‌بندی
+# + کپی سریع پنل (همان اتصال، نام جدید) برای ساخت چند پنل روی یک سرور
 # ============================================================
 
 from telebot import types
@@ -31,7 +32,10 @@ def admin_panels(message):
     bot.send_message(
         message.chat.id,
         "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
-        "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
+        "اتصال پنل‌ها از این قسمت مدیریت می‌شود.\n\n"
+        "💡 نکته: می‌توانید چند پنل با آدرس/یوزرنیم/پسورد یکسان و نام‌های "
+        "متفاوت بسازید (مثلاً یکی «تک‌کاربره ⚡️» و یکی «چندکاربره 🚀»)، "
+        "یا از دکمه «📋 کپی این پنل» در جزئیات هر پنل استفاده کنید.",
         reply_markup=admin_panels_home_keyboard()
     )
 
@@ -64,10 +68,6 @@ def panels_home_callback(call):
 # ---------------- ADD PANEL WIZARD ----------------
 
 def _step_keyboard(back_callback):
-    """
-    هر مرحله از ویزارد افزودن پنل، هم دکمه‌ی بازگشت به مرحله‌ی قبلی
-    (back_callback) و هم دکمه‌ی لغو کامل و بازگشت به منوی پنل‌ها دارد.
-    """
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=back_callback))
     kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
@@ -109,7 +109,15 @@ def panel_add(call):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
 
-    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=kb)
+    bot.send_message(
+        call.message.chat.id,
+        "🖥 نام پنل را ارسال کنید:\n\n"
+        "💡 می‌توانید هر ایموجی دلخواهی را ابتدای نام بگذارید، خودِ ربات "
+        "چیزی به نام پنل اضافه نمی‌کند.\n"
+        "مثال: <code>⚡️ آلمان تک‌کاربره</code>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     bot.register_next_step_handler(call.message, panel_add_name)
 
 
@@ -124,7 +132,13 @@ def panel_add_back_to_name(call):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
 
-    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=kb)
+    bot.send_message(
+        call.message.chat.id,
+        "🖥 نام پنل را ارسال کنید:\n\n"
+        "💡 می‌توانید هر ایموجی دلخواهی را ابتدای نام بگذارید.",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     bot.register_next_step_handler(call.message, panel_add_name)
 
 
@@ -142,10 +156,10 @@ def panel_add_name(message):
         message.chat.id,
         "🌐 آدرس پنل را با پروتکل و پورت ارسال کنید:\n"
         "مثال: <code>https://panel.example.com:8443</code>\n\n"
-        "💡 اگر می‌خواهید همین سرور را با پلن‌بندی متفاوت دوباره اضافه کنید "
-        "(مثلاً یکی محدود، یکی نامحدود)، همین آدرس را دوباره وارد کنید و برای این پنل "
-        "یک نام دیگر انتخاب کرده‌اید — این کار کاملاً مجاز است.",
-        reply_markup=_step_keyboard("paneladd_back_to_name")
+        "💡 وارد کردن آدرسی که قبلاً برای پنل دیگری استفاده شده کاملاً مجاز است — "
+        "می‌توانید چند پنل با پلن‌بندی متفاوت روی یک سرور بسازید.",
+        reply_markup=_step_keyboard("paneladd_back_to_name"),
+        parse_mode="HTML"
     )
     bot.register_next_step_handler(message, panel_add_url, name)
 
@@ -167,24 +181,9 @@ def panel_add_url(message, name):
         "👤 یوزرنیم ادمین پنل را ارسال کنید:\n\n"
         "⚠️ باید یک ادمین <b>sudo</b> باشد نه اپراتور محدود، "
         "چون برای ساخت کاربر لازم است ربات به همه‌ی گروه‌های پنل دسترسی داشته باشد.",
-        reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+        reply_markup=_step_keyboard("paneladd_back_to_name")
     )
-    # مرحله بازگشت به «آدرس» را با یک closure ساده مدیریت می‌کنیم:
     bot.register_next_step_handler(message, panel_add_username, name, url)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "paneladd_back_to_url_placeholder")
-def panel_add_back_to_url(call):
-    """
-    چون آدرس مرحله‌ی قبلی به نام پنل نیاز دارد و آن را در حافظه نگه نمی‌داریم،
-    ساده‌ترین و مطمئن‌ترین راه، بازگرداندن کاربر به همان نقطه‌ی «نام پنل» است
-    تا مسیر تمیز و بدون از دست رفتن اطلاعات دنبال شود.
-    """
-    if not is_admin(call.from_user.id):
-        return
-
-    bot.answer_callback_query(call.id, "برای اصلاح آدرس، لطفاً دوباره از نام پنل شروع کنید.")
-    panel_add_back_to_name(call)
 
 
 def panel_add_username(message, name, url):
@@ -194,7 +193,7 @@ def panel_add_username(message, name, url):
         msg = bot.send_message(
             message.chat.id,
             "❌ یوزرنیم نمی‌تواند خالی باشد. دوباره ارسال کنید:",
-            reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+            reply_markup=_step_keyboard("paneladd_back_to_name")
         )
         bot.register_next_step_handler(msg, panel_add_username, name, url)
         return
@@ -202,7 +201,7 @@ def panel_add_username(message, name, url):
     bot.send_message(
         message.chat.id,
         "🔐 Password پنل را ارسال کنید:",
-        reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+        reply_markup=_step_keyboard("paneladd_back_to_name")
     )
     bot.register_next_step_handler(message, panel_add_password, name, url, username)
 
@@ -214,11 +213,19 @@ def panel_add_password(message, name, url, username):
         msg = bot.send_message(
             message.chat.id,
             "❌ پسورد نمی‌تواند خالی باشد. دوباره ارسال کنید:",
-            reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+            reply_markup=_step_keyboard("paneladd_back_to_name")
         )
         bot.register_next_step_handler(msg, panel_add_password, name, url, username)
         return
 
+    _create_panel_and_test(message.chat.id, name, url, username, password)
+
+
+def _create_panel_and_test(chat_id, name, url, username, password):
+    """
+    یک ردیف پنل جدید در دیتابیس می‌سازد و بلافاصله اتصالش را تست می‌کند.
+    این تابع هم از ویزارد افزودن پنل و هم از قابلیت «کپی پنل» صدا زده می‌شود.
+    """
     db_execute("""
     INSERT INTO panels
     (name, url, username, password,
@@ -235,36 +242,28 @@ def panel_add_password(message, name, url, username):
     ORDER BY id DESC LIMIT 1
     """, (name, url, username), fetchone=True)
 
-    bot.send_message(message.chat.id, "⏳ در حال تست اتصال واقعی به پنل...")
+    bot.send_message(chat_id, "⏳ در حال تست اتصال واقعی به پنل...")
 
     try:
         result = pasarguard_test_panel(panel)
     except Exception as e:
-        # اگر تست اتصال به هر دلیلی (خطای شبکه، فرمت آدرس، timeout و...)
-        # با استثنا مواجه شود، این try/except از کرش کردن کل ربات جلوگیری
-        # می‌کند. پنل در دیتابیس باقی می‌ماند تا بعداً بتوان دوباره تستش کرد.
         db_execute(
             "UPDATE panels SET status=?, updated_at=? WHERE id=?",
             ("offline", now(), panel["id"])
         )
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "⚠️ <b>پنل به دیتابیس اضافه شد، اما هنگام تست اتصال خطای غیرمنتظره رخ داد.</b>\n\n"
             f"❌ جزئیات خطا: <code>{str(e)[:500]}</code>\n\n"
-            "آدرس/یوزرنیم/پسورد را بررسی کن (مطمئن شو آدرس با https:// یا http:// "
-            "شروع می‌شود و پورت درست است)، سپس از منوی پنل روی «🔌 تست اتصال» بزن.",
+            "آدرس/یوزرنیم/پسورد را بررسی کن، سپس از منوی پنل روی «🔌 تست اتصال» بزن.",
             parse_mode="HTML"
         )
-        render_panel_details(message.chat.id, panel["id"])
+        render_panel_details(chat_id, panel["id"])
         return
 
     if result.get("success"):
         status = "online"
-
-        db_execute(
-            "UPDATE panels SET status=?, updated_at=? WHERE id=?",
-            (status, now(), panel["id"])
-        )
+        db_execute("UPDATE panels SET status=?, updated_at=? WHERE id=?", (status, now(), panel["id"]))
 
         sudo_note = (
             "✅ ادمین sudo است."
@@ -273,28 +272,24 @@ def panel_add_password(message, name, url, username):
         )
 
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "✅ <b>پنل با موفقیت اضافه و به آن متصل شد!</b>\n\n"
             f"👤 لاگین به‌عنوان: {result.get('admin_username', '---')}\n"
             f"{sudo_note}"
         )
     else:
         status = "offline"
-
-        db_execute(
-            "UPDATE panels SET status=?, updated_at=? WHERE id=?",
-            (status, now(), panel["id"])
-        )
+        db_execute("UPDATE panels SET status=?, updated_at=? WHERE id=?", (status, now(), panel["id"]))
 
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "⚠️ <b>پنل به دیتابیس اضافه شد، اما اتصال ناموفق بود.</b>\n\n"
             f"❌ خطا: <code>{result.get('error', 'نامشخص')}</code>\n\n"
             "آدرس/یوزرنیم/پسورد رو بررسی کن و از منوی «🖥 مدیریت پنل‌ها» "
             "روی «🔌 تست اتصال» بزن تا دوباره امتحان کنی."
         )
 
-    render_panel_details(message.chat.id, panel["id"])
+    render_panel_details(chat_id, panel["id"])
 
 
 # ---------------- LIST (with pagination) ----------------
@@ -397,15 +392,27 @@ def render_panel_details(chat_id, panel_id, message_id=None):
         (panel_id,), fetchall=True
     )
 
+    # پنل‌های دیگری که دقیقاً همین آدرس را دارند (یعنی روی همین سرور فیزیکی‌اند)
+    siblings = db_execute(
+        "SELECT name FROM panels WHERE url=? AND id != ?",
+        (panel["url"], panel_id), fetchall=True
+    )
+
     text = (
-        f"🖥 <b>{panel['name']}</b>\n\n"
+        f"<b>{panel['name']}</b>\n\n"
         f"🆔 ID: {panel['id']}\n"
         f"🌐 URL: {panel['url']}\n"
         f"📌 وضعیت: {panel['status']}\n"
         f"👥 سرویس‌ها: {services_count}\n"
         f"📊 ظرفیت: {panel['capacity']}\n"
-        f"🟢 فعال: {'بله' if panel['active'] else 'خیر'}\n\n"
+        f"🟢 فعال: {'بله' if panel['active'] else 'خیر'}\n"
     )
+
+    if siblings:
+        sibling_names = "، ".join(s["name"] for s in siblings)
+        text += f"🔗 پنل‌های دیگر روی همین سرور: {sibling_names}\n"
+
+    text += "\n"
 
     if plans:
         text += f"📦 <b>پلن‌های این پنل ({len(plans)}):</b>\n"
@@ -437,6 +444,13 @@ def render_panel_details(chat_id, panel_id, message_id=None):
         types.InlineKeyboardButton("🔄 فعال/غیرفعال", callback_data=f"paneltoggle:{panel_id}")
     )
 
+    kb.add(
+        types.InlineKeyboardButton(
+            "📋 کپی این پنل با اسم جدید (همان سرور)",
+            callback_data=f"panelclone:{panel_id}"
+        )
+    )
+
     if plans:
         kb.add(
             types.InlineKeyboardButton(
@@ -449,12 +463,12 @@ def render_panel_details(chat_id, panel_id, message_id=None):
 
     if message_id:
         try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="HTML")
             return
         except Exception:
             pass
 
-    bot.send_message(chat_id, text, reply_markup=kb)
+    bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("panelbackto:"))
@@ -479,6 +493,67 @@ def panel_details(call):
     bot.answer_callback_query(call.id)
 
 
+# ---------------- CLONE PANEL (same connection, new name) ----------------
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("panelclone:"))
+def panel_clone_start(call):
+    """
+    یک پنل جدید با همان آدرس/یوزرنیم/پسورد پنل مبدأ می‌سازد، فقط با
+    نام دیگری که ادمین وارد می‌کند. برای ساخت مثلاً «تک‌کاربره» و
+    «چندکاربره» روی یک سرور، بدون نیاز به وارد کردن دوباره‌ی اطلاعات
+    اتصال.
+    """
+    if not is_admin(call.from_user.id):
+        return
+
+    panel_id = int(call.data.split(":")[1])
+    panel = db_execute("SELECT * FROM panels WHERE id=?", (panel_id,), fetchone=True)
+
+    if not panel:
+        bot.answer_callback_query(call.id, "پنل پیدا نشد.", show_alert=True)
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{panel_id}"))
+
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"📋 <b>کپی پنل «{panel['name']}»</b>\n\n"
+        "آدرس/یوزرنیم/پسورد همین پنل استفاده می‌شود، فقط اسم جدید بدهید.\n\n"
+        "💡 هر ایموجی دلخواهی را می‌توانید ابتدای نام بگذارید.\n"
+        "مثال: <code>🚀 آلمان چندکاربره</code>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, panel_clone_save, panel_id)
+
+
+def panel_clone_save(message, source_panel_id):
+    new_name = (message.text or "").strip()
+
+    if not new_name:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{source_panel_id}"))
+        msg = bot.send_message(message.chat.id, "❌ نام نمی‌تواند خالی باشد. دوباره ارسال کنید:", reply_markup=kb)
+        bot.register_next_step_handler(msg, panel_clone_save, source_panel_id)
+        return
+
+    source = db_execute("SELECT * FROM panels WHERE id=?", (source_panel_id,), fetchone=True)
+
+    if not source:
+        bot.send_message(message.chat.id, "❌ پنل مبدأ دیگر وجود ندارد.")
+        return
+
+    _create_panel_and_test(
+        message.chat.id,
+        new_name,
+        source["url"],
+        source["username"],
+        source["password"]
+    )
+
+
 # ---------------- RENAME PANEL ----------------
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("panelrename:"))
@@ -499,8 +574,10 @@ def panel_rename_start(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(
         call.message.chat.id,
-        f"✏️ نام فعلی: <b>{panel['name']}</b>\n\nنام جدید پنل را ارسال کنید:",
-        reply_markup=kb
+        f"✏️ نام فعلی: <b>{panel['name']}</b>\n\nنام جدید پنل را ارسال کنید:\n\n"
+        "💡 هر ایموجی دلخواهی را می‌توانید ابتدای نام بگذارید.",
+        reply_markup=kb,
+        parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, panel_rename_save, panel_id)
 
