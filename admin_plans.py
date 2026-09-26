@@ -706,7 +706,6 @@ def plan_create_confirm(call):
 
     data = state["data"]
 
-    # پلن جدید همیشه در انتهای صف (بیشترین sort_order + 1) قرار می‌گیرد
     max_order_row = db_execute(
         "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM plans",
         fetchone=True
@@ -944,50 +943,33 @@ def plan_edit_preview(call):
 
 
 # ============================================================
-# PLAN LIST (+ REORDER)
+# PLAN LIST (+ تنظیم مستقیم جایگاه با عدد)
 # ============================================================
 
 def _plan_list_keyboard(plans):
     """
-    برای هر پلن، هم دکمه‌ی اصلی ورود به جزئیات (که نام و وضعیت را
-    نشان می‌دهد)، هم دو دکمه‌ی ⬆️/⬇️ برای جابه‌جایی ترتیب نمایش
-    ساخته می‌شود. جابه‌جایی فقط sort_order را عوض می‌کند و هیچ
-    تأثیری روی سرویس‌های متصل به این پلن ندارد.
+    برای هر پلن، شماره‌ی جایگاه فعلی‌اش (۱، ۲، ۳...) کنار نامش
+    نشان داده می‌شود، به‌همراه یک دکمه «🔢 تنظیم جایگاه» که با زدنش
+    می‌توان مستقیماً عدد جایگاه دلخواه را وارد کرد (مثلاً «۲» یعنی
+    این پلن باید دومین پلن نمایش داده‌شده باشد). این کار فقط
+    sort_order را عوض می‌کند و به سرویس‌های متصل به این پلن هیچ
+    آسیبی نمی‌رساند.
     """
     kb = types.InlineKeyboardMarkup()
 
-    total = len(plans)
-
-    for index, plan in enumerate(plans):
+    for index, plan in enumerate(plans, start=1):
         status = "🟢" if plan["active"] else "🔴"
 
-        kb.add(
+        kb.row(
             types.InlineKeyboardButton(
-                f"{status} {plan['name']}",
+                f"{index}. {status} {plan['name']}",
                 callback_data=f"planadmin:{plan['id']}"
+            ),
+            types.InlineKeyboardButton(
+                "🔢 تنظیم جایگاه",
+                callback_data=f"plan_set_order:{plan['id']}"
             )
         )
-
-        move_row = []
-
-        if index > 0:
-            move_row.append(
-                types.InlineKeyboardButton(
-                    "⬆️",
-                    callback_data=f"plan_move_up:{plan['id']}"
-                )
-            )
-
-        if index < total - 1:
-            move_row.append(
-                types.InlineKeyboardButton(
-                    "⬇️",
-                    callback_data=f"plan_move_down:{plan['id']}"
-                )
-            )
-
-        if move_row:
-            kb.row(*move_row)
 
     return kb
 
@@ -1016,6 +998,7 @@ def _render_plan_list(chat_id, message_id=None):
                 callback_data="plan_admin_home"
             )
         )
+        text = "📋 <b>لیست پلن‌های VPN</b>\n\n❌ هنوز هیچ پلنی ساخته نشده."
     else:
         kb = _plan_list_keyboard(plans)
         kb.add(
@@ -1024,11 +1007,11 @@ def _render_plan_list(chat_id, message_id=None):
                 callback_data="plan_admin_home"
             )
         )
-
-    text = (
-        "📋 <b>لیست پلن‌های VPN</b>\n\n"
-        "برای تغییر ترتیب نمایش پلن‌ها از دکمه‌های ⬆️ / ⬇️ استفاده کنید."
-    )
+        text = (
+            "📋 <b>لیست پلن‌های VPN</b>\n\n"
+            "برای تغییر ترتیب نمایش، روی «🔢 تنظیم جایگاه» کنار هر پلن بزنید "
+            "و عدد جایگاه دلخواه (مثلاً 1 برای اول شدن) را ارسال کنید."
+        )
 
     if message_id:
         try:
@@ -1062,66 +1045,78 @@ def plan_admin_list(call):
     _render_plan_list(call.message.chat.id)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_move_up:"))
-def plan_move_up(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_set_order:"))
+def plan_set_order_start(call):
 
     if not is_admin(call.from_user.id):
         return
 
     plan_id = int(call.data.split(":")[1])
 
+    plan = db_execute("SELECT name FROM plans WHERE id=?", (plan_id,), fetchone=True)
+    if not plan:
+        bot.answer_callback_query(call.id, "❌ پلن پیدا نشد.", show_alert=True)
+        return
+
+    total = db_execute("SELECT COUNT(*) AS c FROM plans", fetchone=True)["c"]
+
+    bot.answer_callback_query(call.id)
+
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🔢 <b>تنظیم جایگاه پلن «{plan['name']}»</b>\n\n"
+        f"در حال حاضر {total} پلن وجود دارد.\n"
+        f"عددی بین 1 تا {total} بفرستید تا این پلن دقیقاً در همان جایگاه قرار بگیرد.\n\n"
+        "مثال: اگر می‌خواهید این پلن اول لیست باشد، عدد <code>1</code> را بفرستید.",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, plan_set_order_save, plan_id)
+
+
+def plan_set_order_save(message, plan_id):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    text = (message.text or "").strip()
+
+    if not text.isdigit():
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ لطفاً فقط یک عدد صحیح ارسال کنید (مثال: 1):"
+        )
+        bot.register_next_step_handler(msg, plan_set_order_save, plan_id)
+        return
+
+    target_position = int(text)
+
     plans = db_execute(
-        "SELECT id, sort_order FROM plans ORDER BY sort_order ASC, id ASC",
+        "SELECT id FROM plans ORDER BY sort_order ASC, id ASC",
         fetchall=True
     )
+    plan_ids = [p["id"] for p in plans]
 
-    index = next((i for i, p in enumerate(plans) if p["id"] == plan_id), None)
-
-    if index is None or index == 0:
-        bot.answer_callback_query(call.id)
+    if plan_id not in plan_ids:
+        bot.send_message(message.chat.id, "❌ این پلن دیگر وجود ندارد.")
         return
 
-    current = plans[index]
-    previous = plans[index - 1]
+    total = len(plan_ids)
+    target_position = max(1, min(target_position, total))
 
-    # جابه‌جایی sort_order بین این پلن و پلن بالایی‌اش
-    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (previous["sort_order"], current["id"]))
-    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (current["sort_order"], previous["id"]))
+    # پلن مورد نظر را از جای فعلی‌اش بردار و در جایگاه هدف (0-based) بگذار
+    plan_ids.remove(plan_id)
+    plan_ids.insert(target_position - 1, plan_id)
 
-    bot.answer_callback_query(call.id, "✅ جابه‌جا شد.")
+    # حالا کل لیست را دوباره با sort_order پیوسته (0, 1, 2, ...) ذخیره کن
+    for order, pid in enumerate(plan_ids):
+        db_execute("UPDATE plans SET sort_order=? WHERE id=?", (order, pid))
 
-    _render_plan_list(call.message.chat.id, call.message.message_id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_move_down:"))
-def plan_move_down(call):
-
-    if not is_admin(call.from_user.id):
-        return
-
-    plan_id = int(call.data.split(":")[1])
-
-    plans = db_execute(
-        "SELECT id, sort_order FROM plans ORDER BY sort_order ASC, id ASC",
-        fetchall=True
+    bot.send_message(
+        message.chat.id,
+        f"✅ جایگاه پلن به {target_position} تغییر کرد."
     )
 
-    index = next((i for i, p in enumerate(plans) if p["id"] == plan_id), None)
-
-    if index is None or index == len(plans) - 1:
-        bot.answer_callback_query(call.id)
-        return
-
-    current = plans[index]
-    next_plan = plans[index + 1]
-
-    # جابه‌جایی sort_order بین این پلن و پلن پایینی‌اش
-    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (next_plan["sort_order"], current["id"]))
-    db_execute("UPDATE plans SET sort_order=? WHERE id=?", (current["sort_order"], next_plan["id"]))
-
-    bot.answer_callback_query(call.id, "✅ جابه‌جا شد.")
-
-    _render_plan_list(call.message.chat.id, call.message.message_id)
+    _render_plan_list(message.chat.id)
 
 
 # ============================================================
@@ -1690,8 +1685,6 @@ def plan_admin_home(call):
 # ============================================================
 # VOLUME-INCREASE PLANS — مدیریت مستقل پلن‌های افزایش حجم
 # همون ساختار بالا، فقط روی جدول renewal_plans
-# (نام جدول و callback ها به دلایل سازگاری با کد قبلی renewal مانده،
-#  فقط متن‌های نمایشی به «افزایش حجم» تغییر کرده است)
 # ============================================================
 # ============================================================
 
@@ -2741,7 +2734,7 @@ def renewal_save_edit(call):
 
 
 # ============================================================
-# VOLUME-INCREASE — GENERAL BACK (با پشتیبانی از بازگشت مرحله‌به‌مرحله)
+# VOLUME-INCREASE — GENERAL BACK
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "renewal_admin_back")
