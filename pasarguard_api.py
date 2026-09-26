@@ -6,11 +6,42 @@
 import re
 import time
 import asyncio
+import concurrent.futures
 from datetime import datetime
 from pasarguard import PasarguardAPI, Tools, UserCreate, UserModify, UserStatus
 
-VERIFY_SSL = True
-REQUEST_TIMEOUT = 20.0
+VERIFY_SSL = False   # بسیاری از پنل‌های خودمیزبان گواهی SSL خودامضا دارند
+REQUEST_TIMEOUT = 15.0
+HARD_TIMEOUT = 20.0  # سقف مطلق: مهم نیست SDK داخلی چه می‌کند، بعد از این مدت خطا برمی‌گردد
+
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
+
+def _run_with_hard_timeout(async_func, *args, timeout=HARD_TIMEOUT):
+    """
+    asyncio.run را در یک ترد جدا اجرا می‌کند و حداکثر `timeout` ثانیه
+    منتظر می‌ماند. اگر کتابخونه‌ی زیرین (به دلیل گواهی SSL خودامضا،
+    فایروال، یا پورت بسته) بدون پاسخ گیر کند، این تابع به‌جای معطل
+    ماندن ابدی ربات، بعد از سقف زمانی مشخص خطای واضح برمی‌گرداند.
+    """
+    def runner():
+        return asyncio.run(async_func(*args))
+
+    future = _executor.submit(runner)
+
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        return {
+            "success": False,
+            "error": (
+                f"اتصال به پنل بیش از {int(timeout)} ثانیه طول کشید و لغو شد. "
+                "معمولاً یعنی: آدرس/پورت اشتباه است، فایروال پورت را بسته، "
+                "یا گواهی SSL پنل مشکل دارد."
+            ),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def _normalize_url(url):
@@ -142,13 +173,7 @@ async def _get_user_usage_async(panel, username):
 async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
     """
     تمدید روی خود پنل: فقط سقف حجم (data_limit) و تاریخ انقضا بالا
-    برده می‌شود. مصرف قبلی کاربر عمداً صفر نمی‌شود، چون هدف این است که:
-        باقیمانده‌ی جدید = باقیمانده‌ی قبلی + حجم پلن تمدید
-    مثال: پلن ۵ گیگ/۳۰ روز، کاربر ۲ گیگ مصرف کرده (۳ گیگ باقیمانده).
-    بعد از تمدید باید ۸ گیگ باقیمانده داشته باشد (۳ + ۵)، نه ۱۰ گیگ تازه.
-    چون مصرف صفر نمی‌شود و فقط سقف بالا می‌رود، این محاسبه خودکار درست
-    از آب در می‌آید: سقف جدید = سقف قدیم + پلن = ۱۰، مصرف = همان ۲،
-    باقیمانده = ۱۰ - ۲ = ۸. ✅
+    برده می‌شود. مصرف قبلی کاربر عمداً صفر نمی‌شود.
     """
     base_url = _normalize_url(panel["url"])
     async with PasarguardAPI(
@@ -165,7 +190,6 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
         current_limit_gb = (getattr(current, "data_limit", 0) or 0) / (1024 ** 3)
         new_limit_gb = current_limit_gb + float(add_volume_gb)
 
-        # --- تبدیل امن expire به timestamp عددی، چه datetime باشد چه int ---
         current_expire_ts = _to_timestamp(getattr(current, "expire", None))
         now_ts = int(time.time())
         base_ts = current_expire_ts if (current_expire_ts and current_expire_ts > now_ts) else now_ts
@@ -181,8 +205,6 @@ async def _apply_renewal_async(panel, username, add_volume_gb, add_days):
             user=modify,
             token=token.access_token,
         )
-
-        # عمداً مصرف را صفر نمی‌کنیم — دلیل در docstring بالا توضیح داده شد
 
         return {
             "success": True,
@@ -229,8 +251,6 @@ async def _apply_volume_increase_async(panel, username, add_volume_gb):
 async def _delete_service_async(panel, username):
     """
     حذف کامل کاربر از روی پنل.
-    نام متد حذف بین نسخه‌های مختلف SDK پاسارگارد فرق دارد،
-    بنابراین رایج‌ترین نام‌های ممکن را به ترتیب امتحان می‌کنیم.
     """
     base_url = _normalize_url(panel["url"])
     async with PasarguardAPI(
@@ -266,15 +286,15 @@ async def _delete_service_async(panel, username):
 
 # ============================================================
 # SYNC WRAPPERS (used by the rest of the bot)
+# همه از _run_with_hard_timeout عبور می‌کنند تا اگر SDK داخلی به هر
+# دلیلی (SSL خودامضا، پورت بسته، فایروال) گیر کند، ربات هیچ‌وقت
+# بی‌نهایت منتظر نماند و حتماً بعد از HARD_TIMEOUT ثانیه جواب بدهد.
 # ============================================================
 def pasarguard_test_panel(panel):
     panel = dict(panel)
     if not _panel_credentials_ok(panel):
         return {"success": False, "error": "آدرس/یوزرنیم/پسورد پنل کامل نیست."}
-    try:
-        return asyncio.run(_test_panel_async(panel))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_test_panel_async, panel)
 
 
 def pasarguard_create_service(panel, telegram_user, plan, desired_username=None):
@@ -283,53 +303,32 @@ def pasarguard_create_service(panel, telegram_user, plan, desired_username=None)
     plan = dict(plan)
     if not _panel_credentials_ok(panel):
         return {"success": False, "error": "اطلاعات اتصال پنل (URL/Username/Password) کامل نیست."}
-    try:
-        return asyncio.run(
-            _create_service_async(panel, telegram_user, plan, desired_username)
-        )
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_create_service_async, panel, telegram_user, plan, desired_username)
 
 
 def pasarguard_get_user_usage(panel, username):
     panel = dict(panel)
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
-    try:
-        return asyncio.run(_get_user_usage_async(panel, username))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_get_user_usage_async, panel, username)
 
 
 def pasarguard_apply_renewal(panel, username, add_volume_gb, add_days):
     panel = dict(panel)
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
-    try:
-        return asyncio.run(
-            _apply_renewal_async(panel, username, add_volume_gb, add_days)
-        )
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_apply_renewal_async, panel, username, add_volume_gb, add_days)
 
 
 def pasarguard_apply_volume_increase(panel, username, add_volume_gb):
     panel = dict(panel)
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
-    try:
-        return asyncio.run(
-            _apply_volume_increase_async(panel, username, add_volume_gb)
-        )
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_apply_volume_increase_async, panel, username, add_volume_gb)
 
 
 def pasarguard_delete_service(panel, username):
     panel = dict(panel)
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
-    try:
-        return asyncio.run(_delete_service_async(panel, username))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return _run_with_hard_timeout(_delete_service_async, panel, username)
