@@ -16,7 +16,7 @@ from pasarguard_api import pasarguard_get_user_usage, pasarguard_delete_service
 USERNAME_PREFIX = "virangarvpn."
 
 # ============================================================
-# STEP 1: PANEL LIST
+# STEP 1: PANEL LIST — تنها جایی که دکمه «منوی اصلی» دارد
 # ============================================================
 
 def active_panels_with_plans():
@@ -39,6 +39,9 @@ def panels_keyboard():
                 callback_data=f"buypanel:{panel['id']}"
             )
         )
+    kb.add(
+        types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="go_home")
+    )
     return kb, panels
 
 
@@ -75,7 +78,7 @@ def buy_back_home(call):
 
 
 # ============================================================
-# STEP 2: PLAN LIST (per panel)
+# STEP 2: PLAN LIST (per panel) — فقط «بازگشت» دارد، بدون منوی اصلی
 # ============================================================
 
 def plans_keyboard(panel_id):
@@ -94,9 +97,6 @@ def plans_keyboard(panel_id):
         )
     kb.add(
         types.InlineKeyboardButton("🔙 بازگشت", callback_data="buy_back_home")
-    )
-    kb.add(
-        types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home")
     )
     return kb, plans
 
@@ -138,7 +138,7 @@ def select_panel(call):
 
 
 # ============================================================
-# STEP 3: PLAN DETAILS -> ASK CUSTOM NAME
+# STEP 3: PLAN DETAILS -> ASK CUSTOM NAME — فقط «بازگشت»
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buyplan:"))
@@ -167,7 +167,6 @@ def select_plan(call):
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"buypanel:{panel_id}"))
-    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
 
     bot.answer_callback_query(call.id)
     sent = bot.send_message(
@@ -227,7 +226,7 @@ def receive_username(message, plan_id):
 
 
 # ============================================================
-# STEP 4: PAYMENT METHOD SELECTION
+# STEP 4: PAYMENT METHOD SELECTION — فقط «بازگشت»
 # ============================================================
 
 def show_payment_methods(chat_id, telegram_id, plan, username):
@@ -269,9 +268,6 @@ def show_payment_methods(chat_id, telegram_id, plan, username):
             callback_data=f"buypanel:{plan['panel_id']}"
         )
     )
-    kb.add(
-        types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home")
-    )
     bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -308,14 +304,6 @@ def _safe_get(row, key, default=None):
 
 
 def service_label(service):
-    """
-    برچسب نمایشی سرویس به‌صورت خودکار از روی «حجم کل فعلی» و
-    «مجموع روزهای خریداری‌شده» ساخته می‌شود، مثل «20GB 60روزه».
-    این عدد با هر تمدید یا افزایش حجم به‌روز می‌ماند، چون هم
-    volume و هم total_duration_days هرکدام جمع‌شونده هستند.
-    اگر سرویس تست باشد (بدون پلن)، برچسب ثابت «سرویس تست» نمایش
-    داده می‌شود.
-    """
     if not service["plan_id"]:
         return "🎁 سرویس تست"
 
@@ -323,7 +311,6 @@ def service_label(service):
     total_duration = _safe_get(service, "total_duration_days")
 
     if total_duration is None:
-        # هنوز هیچ تمدیدی انجام نشده؛ از مدت پلن اصلی به‌عنوان مقدار پایه استفاده کن
         total_duration = _safe_get(service, "plan_duration", 0)
 
     return f"{volume}GB {total_duration}روزه"
@@ -360,9 +347,6 @@ def _get_user_services(telegram_id):
 
 
 def _get_panel_for_service(service):
-    """
-    service یک sqlite3.Row است، نه دیکشنری معمولی — پس .get() ندارد.
-    """
     try:
         panel_id = service["panel_id"]
     except (KeyError, IndexError):
@@ -467,8 +451,7 @@ def service_details(call):
     user_id = internal_user_id(call.from_user.id)
 
     service = db_execute("""
-    SELECT services.*, plans.name AS plan_name, plans.panel_id AS panel_id,
-           plans.duration AS plan_duration
+    SELECT services.*, plans.name AS plan_name, plans.panel_id AS panel_id
     FROM services
     LEFT JOIN plans ON plans.id=services.plan_id
     WHERE services.id=? AND services.user_id=?
@@ -485,7 +468,6 @@ def service_details(call):
         )
         return
 
-    # --- تلاش برای گرفتن مصرف زنده از پنل ---
     used_volume = service["used_volume"]
     total_volume = service["volume"]
     live_note = ""
@@ -562,8 +544,6 @@ def service_details(call):
             parse_mode="HTML"
         )
     except Exception as e:
-        # اگر محتوا نسبت به قبل تغییری نکرده باشد، تلگرام خطای
-        # "message is not modified" می‌دهد که بی‌خطر است و باید نادیده گرفته شود
         if "message is not modified" not in str(e):
             raise
 
@@ -598,10 +578,6 @@ def service_config(call):
 
 # ============================================================
 # حذف سرویس — با تأییدیه
-# همیشه از دیتابیس محلی حذف می‌شود، صرف نظر از این‌که روی پنل
-# پیدا شود یا نه (ممکن است کاربر یا ادمین قبلاً از پنل حذفش کرده
-# باشد). تلاش برای حذف از پنل انجام می‌شود و اگر ناموفق بود فقط
-# به‌عنوان هشدار نمایش داده می‌شود، نه مانعی برای حذف محلی.
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delsvc_ask:"))
@@ -647,14 +623,11 @@ def delete_service_confirm(call):
     if panel and service["username"]:
         result = pasarguard_delete_service(panel, service["username"])
         if not result.get("success"):
-            # از پنل حذف نشد (شاید از قبل روی پنل نبوده، یا پنل موقتاً
-            # در دسترس نیست) — این جلوی حذف محلی را نمی‌گیرد
             panel_warning = (
                 f"\n\n⚠️ توجه: حذف از پنل انجام نشد ({result.get('error')})."
                 "\nاحتمالاً این سرویس از قبل روی پنل وجود نداشته است."
             )
 
-    # همیشه از دیتابیس محلی حذف می‌شود
     db_execute("DELETE FROM services WHERE id=?", (service_id,))
 
     bot.answer_callback_query(call.id, "✅ سرویس حذف شد.")
