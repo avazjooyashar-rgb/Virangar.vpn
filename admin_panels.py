@@ -10,34 +10,67 @@ from config import bot
 from database import db_execute, now
 from models import is_admin, is_superadmin
 from decorators import admin_only
-from pasarguard import pasarguard_test_panel
+from pasarguard_api import pasarguard_test_panel
 
 
 PANELS_PER_PAGE = 6
 
 
-@bot.message_handler(func=lambda m: m.text == "🖥 مدیریت پنل‌ها")
-@admin_only
-def admin_panels(message):
+def admin_panels_home_keyboard():
     kb = types.InlineKeyboardMarkup()
-
     kb.add(types.InlineKeyboardButton("➕ افزودن پنل", callback_data="panel_add"))
     kb.add(types.InlineKeyboardButton("📋 لیست پنل‌ها", callback_data="panel_list:0"))
     kb.add(types.InlineKeyboardButton("🔄 تست همه‌ی پنل‌ها", callback_data="panel_test_all"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="admin_main"))
+    return kb
 
+
+@bot.message_handler(func=lambda m: m.text == "🖥 مدیریت پنل‌ها")
+@admin_only
+def admin_panels(message):
     bot.send_message(
         message.chat.id,
         "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
         "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
-        reply_markup=kb
+        reply_markup=admin_panels_home_keyboard()
     )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "panels_home")
+def panels_home_callback(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+    try:
+        bot.edit_message_text(
+            "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
+            "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=admin_panels_home_keyboard()
+        )
+    except Exception:
+        bot.send_message(
+            call.message.chat.id,
+            "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
+            "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
+            reply_markup=admin_panels_home_keyboard()
+        )
 
 
 # ---------------- ADD PANEL WIZARD ----------------
 
-def _cancel_kb():
+def _step_keyboard(back_callback):
+    """
+    هر مرحله از ویزارد افزودن پنل، هم دکمه‌ی بازگشت به مرحله‌ی قبلی
+    (back_callback) و هم دکمه‌ی لغو کامل و بازگشت به منوی پنل‌ها دارد.
+    """
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("⬅️ انصراف", callback_data="paneladd_cancel"))
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=back_callback))
+    kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
     return kb
 
 
@@ -50,11 +83,20 @@ def panel_add_cancel(call):
     bot.answer_callback_query(call.id, "لغو شد.")
 
     try:
-        bot.edit_message_text("❌ افزودن پنل لغو شد.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text(
+            "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
+            "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=admin_panels_home_keyboard()
+        )
     except Exception:
-        pass
-
-    admin_panels(call.message)
+        bot.send_message(
+            call.message.chat.id,
+            "🖥 <b>مدیریت پنل‌های PasarGuard</b>\n\n"
+            "اتصال پنل‌ها از این قسمت مدیریت می‌شود.",
+            reply_markup=admin_panels_home_keyboard()
+        )
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "panel_add")
@@ -62,41 +104,120 @@ def panel_add(call):
     if not is_admin(call.from_user.id):
         return
 
-    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=_cancel_kb())
+    bot.answer_callback_query(call.id)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
+
+    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=kb)
+    bot.register_next_step_handler(call.message, panel_add_name)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "paneladd_back_to_name")
+def panel_add_back_to_name(call):
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
+
+    bot.send_message(call.message.chat.id, "🖥 نام پنل را ارسال کنید:", reply_markup=kb)
     bot.register_next_step_handler(call.message, panel_add_name)
 
 
 def panel_add_name(message):
-    name = message.text.strip()
+    name = (message.text or "").strip()
+
+    if not name:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("❌ لغو و بازگشت به منوی پنل‌ها", callback_data="paneladd_cancel"))
+        msg = bot.send_message(message.chat.id, "❌ نام نمی‌تواند خالی باشد. دوباره نام پنل را ارسال کنید:", reply_markup=kb)
+        bot.register_next_step_handler(msg, panel_add_name)
+        return
+
     bot.send_message(
         message.chat.id,
         "🌐 آدرس پنل را با پروتکل و پورت ارسال کنید:\n"
-        "مثال: <code>https://panel.example.com:8443</code>",
-        reply_markup=_cancel_kb()
+        "مثال: <code>https://panel.example.com:8443</code>\n\n"
+        "💡 اگر می‌خواهید همین سرور را با پلن‌بندی متفاوت دوباره اضافه کنید "
+        "(مثلاً یکی محدود، یکی نامحدود)، همین آدرس را دوباره وارد کنید و برای این پنل "
+        "یک نام دیگر انتخاب کرده‌اید — این کار کاملاً مجاز است.",
+        reply_markup=_step_keyboard("paneladd_back_to_name")
     )
     bot.register_next_step_handler(message, panel_add_url, name)
 
 
 def panel_add_url(message, name):
-    url = message.text.strip()
+    url = (message.text or "").strip()
+
+    if not url:
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ آدرس نمی‌تواند خالی باشد. دوباره آدرس پنل را ارسال کنید:",
+            reply_markup=_step_keyboard("paneladd_back_to_name")
+        )
+        bot.register_next_step_handler(msg, panel_add_url, name)
+        return
+
     bot.send_message(
         message.chat.id,
         "👤 یوزرنیم ادمین پنل را ارسال کنید:\n\n"
         "⚠️ باید یک ادمین <b>sudo</b> باشد نه اپراتور محدود، "
         "چون برای ساخت کاربر لازم است ربات به همه‌ی گروه‌های پنل دسترسی داشته باشد.",
-        reply_markup=_cancel_kb()
+        reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
     )
+    # مرحله بازگشت به «آدرس» را با یک closure ساده مدیریت می‌کنیم:
     bot.register_next_step_handler(message, panel_add_username, name, url)
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "paneladd_back_to_url_placeholder")
+def panel_add_back_to_url(call):
+    """
+    چون آدرس مرحله‌ی قبلی به نام پنل نیاز دارد و آن را در حافظه نگه نمی‌داریم،
+    ساده‌ترین و مطمئن‌ترین راه، بازگرداندن کاربر به همان نقطه‌ی «نام پنل» است
+    تا مسیر تمیز و بدون از دست رفتن اطلاعات دنبال شود.
+    """
+    if not is_admin(call.from_user.id):
+        return
+
+    bot.answer_callback_query(call.id, "برای اصلاح آدرس، لطفاً دوباره از نام پنل شروع کنید.")
+    panel_add_back_to_name(call)
+
+
 def panel_add_username(message, name, url):
-    username = message.text.strip()
-    bot.send_message(message.chat.id, "🔐 Password پنل را ارسال کنید:", reply_markup=_cancel_kb())
+    username = (message.text or "").strip()
+
+    if not username:
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ یوزرنیم نمی‌تواند خالی باشد. دوباره ارسال کنید:",
+            reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+        )
+        bot.register_next_step_handler(msg, panel_add_username, name, url)
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "🔐 Password پنل را ارسال کنید:",
+        reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+    )
     bot.register_next_step_handler(message, panel_add_password, name, url, username)
 
 
 def panel_add_password(message, name, url, username):
-    password = message.text.strip()
+    password = (message.text or "").strip()
+
+    if not password:
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ پسورد نمی‌تواند خالی باشد. دوباره ارسال کنید:",
+            reply_markup=_step_keyboard("paneladd_back_to_url_placeholder")
+        )
+        bot.register_next_step_handler(msg, panel_add_password, name, url, username)
+        return
 
     db_execute("""
     INSERT INTO panels
@@ -116,9 +237,28 @@ def panel_add_password(message, name, url, username):
 
     bot.send_message(message.chat.id, "⏳ در حال تست اتصال واقعی به پنل...")
 
-    result = pasarguard_test_panel(panel)
+    try:
+        result = pasarguard_test_panel(panel)
+    except Exception as e:
+        # اگر تست اتصال به هر دلیلی (خطای شبکه، فرمت آدرس، timeout و...)
+        # با استثنا مواجه شود، این try/except از کرش کردن کل ربات جلوگیری
+        # می‌کند. پنل در دیتابیس باقی می‌ماند تا بعداً بتوان دوباره تستش کرد.
+        db_execute(
+            "UPDATE panels SET status=?, updated_at=? WHERE id=?",
+            ("offline", now(), panel["id"])
+        )
+        bot.send_message(
+            message.chat.id,
+            "⚠️ <b>پنل به دیتابیس اضافه شد، اما هنگام تست اتصال خطای غیرمنتظره رخ داد.</b>\n\n"
+            f"❌ جزئیات خطا: <code>{str(e)[:500]}</code>\n\n"
+            "آدرس/یوزرنیم/پسورد را بررسی کن (مطمئن شو آدرس با https:// یا http:// "
+            "شروع می‌شود و پورت درست است)، سپس از منوی پنل روی «🔌 تست اتصال» بزن.",
+            parse_mode="HTML"
+        )
+        render_panel_details(message.chat.id, panel["id"])
+        return
 
-    if result["success"]:
+    if result.get("success"):
         status = "online"
 
         db_execute(
@@ -149,10 +289,12 @@ def panel_add_password(message, name, url, username):
         bot.send_message(
             message.chat.id,
             "⚠️ <b>پنل به دیتابیس اضافه شد، اما اتصال ناموفق بود.</b>\n\n"
-            f"❌ خطا: <code>{result['error']}</code>\n\n"
+            f"❌ خطا: <code>{result.get('error', 'نامشخص')}</code>\n\n"
             "آدرس/یوزرنیم/پسورد رو بررسی کن و از منوی «🖥 مدیریت پنل‌ها» "
             "روی «🔌 تست اتصال» بزن تا دوباره امتحان کنی."
         )
+
+    render_panel_details(message.chat.id, panel["id"])
 
 
 # ---------------- LIST (with pagination) ----------------
@@ -168,7 +310,17 @@ def panel_list(call):
 
     if not panels:
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "📭 هنوز پنلی اضافه نشده.")
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="panels_home"))
+        try:
+            bot.edit_message_text(
+                "📭 هنوز پنلی اضافه نشده.",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=kb
+            )
+        except Exception:
+            bot.send_message(call.message.chat.id, "📭 هنوز پنلی اضافه نشده.", reply_markup=kb)
         return
 
     total_pages = max(1, (len(panels) + PANELS_PER_PAGE - 1) // PANELS_PER_PAGE)
@@ -206,6 +358,8 @@ def panel_list(call):
 
     if len(nav_row) > 1:
         kb.row(*nav_row)
+
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="panels_home"))
 
     try:
         bot.edit_message_text(
@@ -352,10 +506,13 @@ def panel_rename_start(call):
 
 
 def panel_rename_save(message, panel_id):
-    new_name = message.text.strip()
+    new_name = (message.text or "").strip()
 
     if not new_name:
-        bot.send_message(message.chat.id, "❌ نام نمی‌تواند خالی باشد.")
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{panel_id}"))
+        msg = bot.send_message(message.chat.id, "❌ نام نمی‌تواند خالی باشد. دوباره ارسال کنید:", reply_markup=kb)
+        bot.register_next_step_handler(msg, panel_rename_save, panel_id)
         return
 
     db_execute(
@@ -394,10 +551,13 @@ def panel_capacity_start(call):
 
 
 def panel_capacity_save(message, panel_id):
-    text = message.text.strip()
+    text = (message.text or "").strip()
 
     if not text.isdigit():
-        bot.send_message(message.chat.id, "❌ لطفاً فقط عدد ارسال کنید.")
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data=f"panelbackto:{panel_id}"))
+        msg = bot.send_message(message.chat.id, "❌ لطفاً فقط عدد ارسال کنید.", reply_markup=kb)
+        bot.register_next_step_handler(msg, panel_capacity_save, panel_id)
         return
 
     db_execute(
@@ -523,12 +683,23 @@ def panel_test(call):
     if not panel:
         return
 
-    result = pasarguard_test_panel(panel)
-    status = "online" if result["success"] else "offline"
+    try:
+        result = pasarguard_test_panel(panel)
+    except Exception as e:
+        db_execute("UPDATE panels SET status=?, updated_at=? WHERE id=?", ("offline", now(), panel_id))
+        bot.answer_callback_query(
+            call.id,
+            f"خطای غیرمنتظره در تست اتصال: {str(e)[:200]}",
+            show_alert=True
+        )
+        render_panel_details(call.message.chat.id, panel_id, call.message.message_id)
+        return
+
+    status = "online" if result.get("success") else "offline"
 
     db_execute("UPDATE panels SET status=?, updated_at=? WHERE id=?", (status, now(), panel_id))
 
-    if result["success"]:
+    if result.get("success"):
         sudo_text = "sudo ✅" if result.get("is_sudo") else "sudo ❌ (اپراتور محدود)"
 
         bot.answer_callback_query(
@@ -539,7 +710,7 @@ def panel_test(call):
             show_alert=True
         )
     else:
-        bot.answer_callback_query(call.id, f"اتصال ناموفق: {result['error']}", show_alert=True)
+        bot.answer_callback_query(call.id, f"اتصال ناموفق: {result.get('error', 'نامشخص')}", show_alert=True)
 
     render_panel_details(call.message.chat.id, panel_id, call.message.message_id)
 
@@ -562,17 +733,21 @@ def panel_test_all(call):
     lines = []
 
     for panel in panels:
-        result = pasarguard_test_panel(panel)
-        status = "online" if result["success"] else "offline"
+        try:
+            result = pasarguard_test_panel(panel)
+        except Exception as e:
+            result = {"success": False, "error": f"خطای غیرمنتظره: {str(e)[:100]}"}
+
+        status = "online" if result.get("success") else "offline"
 
         db_execute("UPDATE panels SET status=?, updated_at=? WHERE id=?", (status, now(), panel["id"]))
 
-        if result["success"]:
+        if result.get("success"):
             online += 1
             lines.append(f"🟢 {panel['name']} — آنلاین")
         else:
             offline += 1
-            lines.append(f"🔴 {panel['name']} — آفلاین")
+            lines.append(f"🔴 {panel['name']} — آفلاین ({result.get('error', 'نامشخص')[:60]})")
 
     summary = (
         f"✅ تست تمام پنل‌ها انجام شد.\n\n"
