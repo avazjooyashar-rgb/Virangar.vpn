@@ -35,7 +35,7 @@ def panels_keyboard():
     for panel in panels:
         kb.add(
             types.InlineKeyboardButton(
-                f"🖥 {panel['name']}",
+                panel['name'],
                 callback_data=f"buypanel:{panel['id']}"
             )
         )
@@ -118,7 +118,7 @@ def select_panel(call):
 
     if not plans:
         bot.edit_message_text(
-            f"🖥 <b>{panel['name']}</b>\n\n"
+            f"<b>{panel['name']}</b>\n\n"
             "❌ برای این پنل هنوز پلنی تعریف نشده.",
             call.message.chat.id,
             call.message.message_id,
@@ -128,7 +128,7 @@ def select_panel(call):
         return
 
     bot.edit_message_text(
-        f"🖥 پنل: <b>{panel['name']}</b>\n\n"
+        f"پنل: <b>{panel['name']}</b>\n\n"
         "💎 یکی از پلن‌های زیر را انتخاب کنید:",
         call.message.chat.id,
         call.message.message_id,
