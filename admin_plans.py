@@ -2710,6 +2710,10 @@ def renewal_admin_back(call):
 
 # ============================================================
 # ADMIN MAIN — بازگشت به کیبورد اصلی پنل مدیریت
+# پیام قبلی (که ممکن است اطلاعات حساس تنظیمات را داشته باشد)
+# کاملاً حذف می‌شود، نه فقط دکمه‌هایش. اگر حذف پیام به هر دلیلی
+# (مثلاً پیام قدیمی‌تر از ۴۸ ساعت) ممکن نبود، حداقل متن آن هم
+# پاک/خنثی می‌شود تا اطلاعاتی روی صفحه باقی نماند.
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_main")
@@ -2722,14 +2726,26 @@ def admin_main_callback(call):
 
     bot.answer_callback_query(call.id)
 
+    deleted = False
     try:
-        bot.edit_message_reply_markup(
+        bot.delete_message(
             call.message.chat.id,
-            call.message.message_id,
-            reply_markup=None
+            call.message.message_id
         )
+        deleted = True
     except Exception:
-        pass
+        deleted = False
+
+    if not deleted:
+        try:
+            bot.edit_message_text(
+                "👑 پنل مدیریت",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
 
     from keyboards import admin_keyboard
 
