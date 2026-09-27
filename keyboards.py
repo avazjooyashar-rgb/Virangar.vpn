@@ -46,10 +46,15 @@ def force_join_markup():
 
     url = get_setting("force_join_url", "").strip()
 
+    # متن دکمه‌ی عضویت، قابل تنظیم توسط ادمین از پنل (پیش‌فرض اگر خالی بود)
+    btn_text = get_setting("force_join_button_text", "").strip()
+    if not btn_text:
+        btn_text = "📢 عضویت در کانال"
+
     if url:
         markup.add(
             types.InlineKeyboardButton(
-                "📢 عضویت در کانال",
+                btn_text,
                 url=url
             )
         )
