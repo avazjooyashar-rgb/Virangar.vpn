@@ -4,12 +4,12 @@
 # + تنظیمات عضویت اجباری
 #
 # منطق کلی:
-#   - کل مسیر هر بخش روی «یک پیام واحد» با edit_message_text پیش می‌ره،
-#     یعنی هیچ پیام جدیدی برای مراحل ساخته نمیشه و صفحه شلوغ نمیشه.
-#   - پیام‌هایی که خود ادمین برای وارد کردن مقدار (متن/آیدی/لینک و ...)
-#     می‌فرسته، بلافاصله بعد از پردازش پاک میشن.
-#   - فقط وقتی که با «بازگشت به منوی مدیریت» خارج میشیم، پیام مرحله
-#     پاک شده و منوی ری‌پلای مدیریت (که یه کیبورد متفاوته) فرستاده میشه.
+#   - کل مسیر هر بخش روی «یک پیام واحد» با edit_message_text پیش می‌ره.
+#   - پیام‌هایی که خود ادمین برای وارد کردن مقدار می‌فرسته، بلافاصله
+#     بعد از پردازش پاک میشن.
+#   - زنجیره‌ی بازگشت: فقط مرحله‌ی اول (گرفتن متن پیام) دکمه‌ی
+#     «بازگشت به منوی مدیریت» داره. همه‌ی مراحل بعدی فقط یک دکمه‌ی
+#     «🔙 بازگشت» دارن که دقیقاً به مرحله‌ی قبل از خودشون برمی‌گردن.
 #   - هر جا از یه مرحله خارج/کنسل میشیم، next_step_handler همون چت رو
 #     هم پاک می‌کنیم تا هیچ‌وقت پیام بعدی (مثلاً /start) رو قورت نده.
 # ============================================================
@@ -77,7 +77,6 @@ def _fmt_duration(seconds):
 def _go_admin_menu(call):
     chat_id = call.message.chat.id
 
-    # پاک کردن هر next_step_handler نیمه‌کاره‌ی احتمالی روی این چت
     bot.clear_step_handler_by_chat_id(chat_id)
 
     try:
@@ -324,6 +323,14 @@ def _fj_message_received(message):
 
 # ============================================================
 # BROADCAST
+#
+# زنجیره‌ی مراحل:
+#   1) متن پیام            -> بازگشت = منوی مدیریت
+#   2) مدیریت/پیش‌نمایش    -> بازگشت = مرحله ۱ (ویرایش متن)
+#   3) متن دکمه            -> بازگشت = مرحله ۲
+#   4) نوع دکمه            -> بازگشت = مرحله ۳
+#   5) مقدار دکمه (لینک/پارامتر) -> بازگشت = مرحله ۴
+#   6) پیش‌نمایش نهایی     -> بازگشت = مرحله ۲
 # ============================================================
 
 def _bc_buttons_desc(rows):
@@ -335,16 +342,66 @@ def _bc_buttons_desc(rows):
     return "\n".join(lines) if lines else "— (بدون دکمه)"
 
 
-def _bc_back_to_manage_markup():
-    m = types.InlineKeyboardMarkup()
-    m.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_manage"))
-    return m
-
-
 def _bc_users_count():
     users = db_execute("SELECT telegram_id FROM users WHERE is_blocked=0", fetchall=True)
     return len(users) if users else 0
 
+
+# ---------- مرحله ۱: گرفتن متن پیام ----------
+
+def _bc_ask_text(chat_id, message_id):
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    try:
+        bot.edit_message_text(
+            "📢 <b>پیام همگانی جدید</b>\n\nمتنی که می‌خوای برای همه ارسال بشه رو بفرست:",
+            chat_id, message_id, reply_markup=m, parse_mode="HTML"
+        )
+    except Exception:
+        pass
+    bot.register_next_step_handler_by_chat_id(chat_id, _bc_text_received)
+
+
+@bot.message_handler(func=lambda m: m.text == "📢 ارسال همگانی")
+@admin_only
+def broadcast_entry(message):
+    chat_id = message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+
+    sent = bot.send_message(
+        chat_id,
+        "📢 <b>پیام همگانی جدید</b>\n\nمتنی که می‌خوای برای همه ارسال بشه رو بفرست:",
+        reply_markup=m, parse_mode="HTML"
+    )
+    _state[chat_id] = {"flow": "bc", "msg_id": sent.message_id, "text": None, "rows": [[]]}
+    bot.register_next_step_handler_by_chat_id(chat_id, _bc_text_received)
+
+
+def _bc_text_received(message):
+    chat_id = message.chat.id
+    st = _state.get(chat_id)
+    _safe_delete(message)
+    if not st or st.get("flow") != "bc":
+        return
+    st["text"] = message.text
+    _bc_render_manage(chat_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_edit_text")
+@admin_only_call
+def cb_bc_edit_text(call):
+    if not _check_state(call, "bc"):
+        return
+    chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
+    _bc_ask_text(chat_id, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+
+# ---------- مرحله ۲: مدیریت متن/دکمه‌ها ----------
 
 def _bc_render_manage(chat_id):
     st = _state.get(chat_id)
@@ -365,44 +422,12 @@ def _bc_render_manage(chat_id):
     if any(st["rows"]):
         m.row(types.InlineKeyboardButton("⬇️ افزودن دکمه در ردیف جدید", callback_data="bc_add_newrow"))
     m.row(types.InlineKeyboardButton("👁 پیش‌نمایش نهایی و ارسال", callback_data="bc_preview"))
-    m.row(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    m.row(types.InlineKeyboardButton("🔙 بازگشت (ویرایش متن پیام)", callback_data="bc_edit_text"))
 
     try:
         bot.edit_message_text(text, chat_id, st["msg_id"], reply_markup=m, parse_mode="HTML")
     except Exception:
         pass
-
-
-@bot.message_handler(func=lambda m: m.text == "📢 ارسال همگانی")
-@admin_only
-def broadcast_entry(message):
-    chat_id = message.chat.id
-    bot.clear_step_handler_by_chat_id(chat_id)
-
-    sent = bot.send_message(
-        chat_id,
-        "📢 <b>پیام همگانی جدید</b>\n\nمتنی که می‌خوای برای همه ارسال بشه رو بفرست:",
-        reply_markup=_bc_cancel_markup(),
-        parse_mode="HTML"
-    )
-    _state[chat_id] = {"flow": "bc", "msg_id": sent.message_id, "text": None, "rows": [[]]}
-    bot.register_next_step_handler_by_chat_id(chat_id, _bc_text_received)
-
-
-def _bc_cancel_markup():
-    m = types.InlineKeyboardMarkup()
-    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
-    return m
-
-
-def _bc_text_received(message):
-    chat_id = message.chat.id
-    st = _state.get(chat_id)
-    _safe_delete(message)
-    if not st or st.get("flow") != "bc":
-        return
-    st["text"] = message.text
-    _bc_render_manage(chat_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "bc_manage")
@@ -413,6 +438,21 @@ def cb_bc_manage(call):
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
     _bc_render_manage(call.message.chat.id)
     bot.answer_callback_query(call.id)
+
+
+# ---------- مرحله ۳: متن دکمه ----------
+
+def _bc_ask_label(chat_id, message_id):
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_manage"))
+    try:
+        bot.edit_message_text(
+            "✏️ متن دکمه رو بفرست:",
+            chat_id, message_id, reply_markup=m
+        )
+    except Exception:
+        pass
+    bot.register_next_step_handler_by_chat_id(chat_id, _bc_label_received)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("bc_add", "bc_add_newrow"))
@@ -429,13 +469,8 @@ def cb_bc_add(call):
     elif not st["rows"]:
         st["rows"] = [[]]
 
-    bot.edit_message_text(
-        "✏️ متن دکمه رو بفرست:",
-        chat_id, call.message.message_id,
-        reply_markup=_bc_back_to_manage_markup()
-    )
+    _bc_ask_label(chat_id, call.message.message_id)
     bot.answer_callback_query(call.id)
-    bot.register_next_step_handler_by_chat_id(chat_id, _bc_label_received)
 
 
 def _bc_label_received(message):
@@ -446,17 +481,51 @@ def _bc_label_received(message):
         return
 
     st["_tmp_label"] = message.text.strip()[:60]
+    _bc_show_type_menu(chat_id, st["msg_id"])
 
+
+# ---------- مرحله ۴: نوع دکمه ----------
+
+def _bc_show_type_menu(chat_id, message_id):
     m = types.InlineKeyboardMarkup()
     m.row(types.InlineKeyboardButton("🔗 لینک", callback_data="bc_type_url"))
     m.row(types.InlineKeyboardButton("🚀 استارت ربات", callback_data="bc_type_start"))
     m.row(types.InlineKeyboardButton("✅ چک عضویت کانال", callback_data="bc_type_check"))
-    m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_manage"))
-
+    m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_back_to_label"))
     try:
-        bot.edit_message_text("نوع دکمه رو انتخاب کن:", chat_id, st["msg_id"], reply_markup=m)
+        bot.edit_message_text("نوع دکمه رو انتخاب کن:", chat_id, message_id, reply_markup=m)
     except Exception:
         pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_back_to_label")
+@admin_only_call
+def cb_bc_back_to_label(call):
+    if not _check_state(call, "bc"):
+        return
+    chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
+    _bc_ask_label(chat_id, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+
+# ---------- مرحله ۵: مقدار دکمه ----------
+
+def _bc_value_back_markup():
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_back_to_type"))
+    return m
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_back_to_type")
+@admin_only_call
+def cb_bc_back_to_type(call):
+    if not _check_state(call, "bc"):
+        return
+    chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
+    _bc_show_type_menu(chat_id, call.message.message_id)
+    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "bc_type_url")
@@ -468,7 +537,7 @@ def cb_bc_type_url(call):
     bot.edit_message_text(
         "🔗 لینک (URL) دکمه رو بفرست:",
         chat_id, call.message.message_id,
-        reply_markup=_bc_back_to_manage_markup()
+        reply_markup=_bc_value_back_markup()
     )
     bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _bc_url_received)
@@ -486,7 +555,7 @@ def _bc_url_received(message):
         try:
             bot.edit_message_text(
                 "⚠️ لینک معتبر نیست (باید با http شروع بشه). دوباره بفرست:",
-                chat_id, st["msg_id"], reply_markup=_bc_back_to_manage_markup()
+                chat_id, st["msg_id"], reply_markup=_bc_value_back_markup()
             )
         except Exception:
             pass
@@ -511,7 +580,7 @@ def cb_bc_type_start(call):
         "🚀 پارامتر start رو بفرست.\n"
         "اگه نمی‌خوای پارامتر خاصی بذاری، فقط بنویس: -",
         chat_id, call.message.message_id,
-        reply_markup=_bc_back_to_manage_markup()
+        reply_markup=_bc_value_back_markup()
     )
     bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _bc_start_received)
@@ -579,6 +648,8 @@ def _bc_build_user_markup(rows):
     return m
 
 
+# ---------- مرحله ۶: پیش‌نمایش نهایی ----------
+
 @bot.callback_query_handler(func=lambda c: c.data == "bc_preview")
 @admin_only_call
 def cb_bc_preview(call):
@@ -602,8 +673,7 @@ def _bc_render_preview(chat_id):
             confirm.row(*row)
 
     confirm.row(types.InlineKeyboardButton("✅ تایید و ارسال برای همه", callback_data="bc_confirm"))
-    confirm.row(types.InlineKeyboardButton("✏️ ویرایش دکمه‌ها", callback_data="bc_manage"))
-    confirm.row(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    confirm.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_manage"))
 
     count = _bc_users_count()
     eta = _fmt_duration(count * 0.04)
@@ -671,7 +741,6 @@ def cb_bc_confirm(call):
     bcid = _broadcast_seq
     _sent_broadcasts[bcid] = {"recipients": recipients, "sent": sent, "failed": failed}
 
-    # فقط آخرین چند تا کمپین رو تو حافظه نگه می‌داریم که سنگین نشه
     if len(_sent_broadcasts) > 15:
         _sent_broadcasts.pop(min(_sent_broadcasts.keys()), None)
 
