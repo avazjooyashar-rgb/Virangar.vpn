@@ -11,6 +11,14 @@ from models import ensure_user, is_superadmin
 from keyboards import user_keyboard, force_join_markup
 
 
+DEFAULT_FORCE_JOIN_MESSAGE = (
+    "🚀 <b>فقط یه قدم تا شروع فاصله داری!</b>\n\n"
+    "برای استفاده از امکانات ربات، اول عضو کانال ما شو؛ "
+    "اونجا خبرای داغ، تخفیف‌های ویژه و آپدیت‌های جدید منتظرتن 🎁\n\n"
+    "بعد از عضویت، دکمه‌ی «بررسی عضویت» رو بزن 👇"
+)
+
+
 def force_join_ok(user_id):
     enabled = get_setting("force_join_enabled", "0") == "1"
 
@@ -36,8 +44,17 @@ def force_join_ok(user_id):
         return False
 
 
+def _force_join_message_text():
+    text = get_setting("force_join_message_text", "").strip()
+    return text or DEFAULT_FORCE_JOIN_MESSAGE
+
+
 @bot.message_handler(commands=["start"])
 def start(message):
+    # اگه از یه مرحله‌ی نیمه‌کاره‌ی پنل ادمین (broadcast/force-join) هندلری
+    # روی این چت رجیستر مونده باشه، پاکش می‌کنیم تا جلوی /start رو نگیره.
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+
     user = ensure_user(message.from_user)
 
     if user["is_blocked"]:
@@ -50,8 +67,9 @@ def start(message):
     if not force_join_ok(message.from_user.id):
         bot.send_message(
             message.chat.id,
-            "🔒 برای استفاده از ربات ابتدا عضو کانال شوید.",
-            reply_markup=force_join_markup()
+            _force_join_message_text(),
+            reply_markup=force_join_markup(),
+            parse_mode="HTML"
         )
         return
 
@@ -75,12 +93,12 @@ def check_join(call):
     if force_join_ok(call.from_user.id):
         bot.answer_callback_query(
             call.id,
-            "عضویت تأیید شد ✅"
+            "🎉 عضویت تأیید شد!"
         )
 
         bot.send_message(
             call.message.chat.id,
-            "🔥 حالا می‌تونی از ربات استفاده کنی.",
+            "✅ خوش اومدی! حالا می‌تونی از همه‌ی امکانات ربات استفاده کنی 🚀",
             reply_markup=user_keyboard(
                 is_super_admin=is_superadmin(call.from_user.id)
             )
@@ -88,6 +106,6 @@ def check_join(call):
     else:
         bot.answer_callback_query(
             call.id,
-            "هنوز عضو کانال نیستی ❌",
+            "❌ هنوز عضو کانال نشدی. اول عضو شو، بعد دوباره بزن.",
             show_alert=True
         )
