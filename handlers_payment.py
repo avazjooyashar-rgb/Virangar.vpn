@@ -12,6 +12,7 @@ from services import create_local_service
 from decorators import admin_only
 from keyboards import admin_keyboard
 from datetime import datetime
+import chat_clean as cc
 
 PAGE_SIZE = 5  # تعداد پرداخت در هر صفحه لیست مدیریت
 
@@ -120,7 +121,8 @@ def manual_payment(call):
         "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
     )
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی روش پرداخت پاک بشه
+    cc.show(call.message.chat.id, text, parse_mode="HTML")
     bot.register_next_step_handler(
         call.message,
         receive_plan_receipt,
@@ -130,8 +132,11 @@ def manual_payment(call):
 
 
 def receive_plan_receipt(message, plan_id, username):
+    cc.drop(message)                       # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
+    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
+
     if not message.photo:
-        sent = bot.send_message(message.chat.id, "❌  لطفاً تصویر رسید را ارسال کن.")
+        sent = cc.show(message.chat.id, "❌  لطفاً تصویر رسید را ارسال کن.", key="err")
         bot.register_next_step_handler(sent, receive_plan_receipt, plan_id, username)
         return
     file_id = message.photo[-1].file_id
@@ -152,7 +157,7 @@ def receive_plan_receipt(message, plan_id, username):
     ))
     # دیگه پیام خودکار به ادمین ارسال نمی‌شود؛ فقط در دیتابیس pending می‌ماند
     # و از طریق «مدیریت پرداخت‌ها» قابل مشاهده و بررسی است.
-    bot.send_message(
+    cc.show(
         message.chat.id,
         "✅  رسید شما ثبت شد.\n\n"
         "⏳  پرداخت در انتظار بررسی مدیریت است."
@@ -210,10 +215,12 @@ def wallet_payment(call):
     )
 
     if not result["success"]:
-        bot.send_message(
+        # صفحه‌ی روش پرداخت می‌مونه (کاربر بتونه دوباره تلاش کنه)، پیام خطا کنارش میاد
+        cc.show(
             call.message.chat.id,
             "❌ ساخت سرویس ناموفق بود. لطفاً بعداً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.\n\n"
             f"<code>{result['error']}</code>",
+            key="err",
             parse_mode="HTML"
         )
         # این یک خطای فنی (نه یک پرداخت جدید در انتظار) است، همچنان به‌صورت
@@ -249,6 +256,10 @@ def wallet_payment(call):
         user["id"], plan_id, plan["price"], username, service["id"], now(), now()
     ))
 
+    # صفحه‌ی روش پرداخت پاک میشه؛ پیام موفقیت (شامل لینک اشتراک) عمداً
+    # ثبت/پاک نمیشه تا کاربر لینکش رو از دست نده.
+    cc.drop_screen(call.message.chat.id)
+    cc.safe_delete(call.message.chat.id, call.message.message_id)
     bot.send_message(
         call.message.chat.id,
         "🎉 <b>پرداخت با موفقیت انجام شد!</b>\n\n"
@@ -375,8 +386,11 @@ def _render_payment_panel_text(status, page):
 @bot.message_handler(func=lambda m: m.text == "💰 پرداخت‌ها")
 @admin_only
 def open_payment_management(message):
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     text, kb = _render_payment_panel_text("pending", 0)
-    bot.send_message(message.chat.id, text, reply_markup=kb, parse_mode="HTML")
+    # صفحه‌ی قبلی ادمین (منوی مدیریت یا هر بخش دیگه) پاک میشه
+    cc.show(message.chat.id, text, key="admin_menu", reply_markup=kb, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "paymgmt_back")
@@ -384,11 +398,18 @@ def payment_management_back(call):
     if not is_superadmin(call.from_user.id):
         bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
         return
-    try:
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    except Exception:
-        pass
-    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=admin_keyboard())
+    # اگه این پیام همون صفحه‌ی فعلیه پایین با نمایش منو پاک میشه، وگرنه فقط دکمه‌هاش برداشته میشه
+    if not cc.is_screen(call.message.chat.id, call.message.message_id, "admin_menu"):
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+    cc.show(
+        call.message.chat.id,
+        "🏠 بازگشت به منوی اصلی",
+        key="admin_menu",
+        reply_markup=admin_keyboard()
+    )
     bot.answer_callback_query(call.id)
 
 
@@ -402,6 +423,9 @@ def payment_management_panel(call):
     page = int(page)
     text, kb = _render_payment_panel_text(status, page)
 
+    # با برگشت به لیست، عکس رسیدِ صفحه‌ی جزئیات پاک میشه
+    cc.drop_screen(call.message.chat.id, "admin_receipt")
+
     try:
         bot.edit_message_text(
             text,
@@ -410,8 +434,10 @@ def payment_management_panel(call):
             reply_markup=kb,
             parse_mode="HTML"
         )
-    except Exception:
-        bot.send_message(call.message.chat.id, text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            cc.safe_delete(call.message.chat.id, call.message.message_id)
+            cc.show(call.message.chat.id, text, key="admin_menu", reply_markup=kb, parse_mode="HTML")
 
     bot.answer_callback_query(call.id)
 
@@ -486,9 +512,12 @@ def payment_detail(call):
         )
     kb.add(types.InlineKeyboardButton("⬅️ بازگشت به لیست", callback_data=f"paymgmt:{status}:{page}"))
 
+    # عکس رسیدِ جزئیات قبلی (اگه بود) پاک بشه، فقط رسید همین پرداخت بمونه
+    cc.drop_screen(call.message.chat.id, "admin_receipt")
     if payment["receipt_file_id"]:
         try:
-            bot.send_photo(call.message.chat.id, payment["receipt_file_id"], caption="🧾 رسید پرداخت")
+            photo_msg = bot.send_photo(call.message.chat.id, payment["receipt_file_id"], caption="🧾 رسید پرداخت")
+            cc.track(call.message.chat.id, photo_msg.message_id, "admin_receipt")
         except Exception:
             pass
 
@@ -665,8 +694,10 @@ def online_payment(call):
     if not provider:
         bot.answer_callback_query(call.id, "درگاه پرداخت تنظیم نشده.", show_alert=True)
         return
-    bot.send_message(
+    # صفحه‌ی روش پرداخت می‌مونه، این پیام موقتی کنارش میاد
+    cc.show(
         call.message.chat.id,
         "🌐 درگاه آنلاین فعال است، اما اتصال نهایی "
-        "به API درگاه انتخابی نیاز به مشخصات همان درگاه دارد."
+        "به API درگاه انتخابی نیاز به مشخصات همان درگاه دارد.",
+        key="err"
     )
