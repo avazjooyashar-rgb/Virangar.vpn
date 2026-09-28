@@ -43,6 +43,12 @@ def delete_later(chat_id, message_id, delay=1.0):
     t.start()
 
 
+def get_screen(chat_id, key="main"):
+    """آیدی پیامِ «صفحه‌ی فعلیِ» این کلید رو برمی‌گردونه (یا None)."""
+    with _lock:
+        return _last.get((chat_id, key))
+
+
 def is_screen(chat_id, message_id, key="main"):
     """آیا این پیام همون «صفحه‌ی» فعلیِ ثبت‌شده‌ست؟ (یعنی پیام منو/مرحله‌ست، نه مثلاً کانفیگ)"""
     with _lock:
