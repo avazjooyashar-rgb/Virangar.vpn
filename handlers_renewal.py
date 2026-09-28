@@ -14,6 +14,7 @@ from config import bot
 from database import db_execute, get_setting, now
 from models import internal_user_id, get_user
 from pasarguard_api import pasarguard_apply_renewal
+import chat_clean as cc
 
 
 # ============================================================
@@ -194,7 +195,8 @@ def renew_wallet(call):
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
     bot.answer_callback_query(call.id, "✅ سرویس با موفقیت تمدید شد.")
-    bot.send_message(
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی تمدید پاک بشه
+    cc.show(
         call.message.chat.id,
         f"🎉 <b>تمدید موفق</b>\n\n"
         f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
@@ -231,19 +233,23 @@ def renew_card(call):
         "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
     )
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی روش پرداخت پاک بشه
+    cc.show(call.message.chat.id, text, parse_mode="HTML")
     bot.register_next_step_handler(call.message, receive_renew_receipt, service_id)
 
 
 def receive_renew_receipt(message, service_id):
+    cc.drop(message)                       # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
+    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
+
     if not message.photo:
-        sent = bot.send_message(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.")
+        sent = cc.show(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.", key="err")
         bot.register_next_step_handler(sent, receive_renew_receipt, service_id)
         return
 
     service = _get_owned_service(service_id, message.from_user.id)
     if not service or not service["plan_id"]:
-        bot.send_message(message.chat.id, "❌ سرویس پیدا نشد.")
+        cc.show(message.chat.id, "❌ سرویس پیدا نشد.")
         return
 
     file_id = message.photo[-1].file_id
@@ -259,7 +265,7 @@ def receive_renew_receipt(message, service_id):
         service_id, service["plan_duration"], service["plan_volume"], now(), now()
     ))
 
-    bot.send_message(
+    cc.show(
         message.chat.id,
         "✅ رسید شما ثبت شد.\n\n"
         "⏳ درخواست تمدید در انتظار بررسی مدیریت است."
@@ -442,7 +448,8 @@ def increase_wallet(call):
     remaining_after = round(max(0, new_total_volume - service["used_volume"]), 2)
 
     bot.answer_callback_query(call.id, "✅ حجم و زمان با موفقیت اضافه شد.")
-    bot.send_message(
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی افزایش حجم پاک بشه
+    cc.show(
         call.message.chat.id,
         f"🎉 <b>افزایش حجم موفق</b>\n\n"
         f"📦 برچسب جدید سرویس: <code>{new_total_volume}GB {new_total_duration}روزه</code>\n"
@@ -493,19 +500,23 @@ def increase_card(call):
         "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
     )
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی روش پرداخت پاک بشه
+    cc.show(call.message.chat.id, text, parse_mode="HTML")
     bot.register_next_step_handler(call.message, receive_increase_receipt, service_id, pkg_id)
 
 
 def receive_increase_receipt(message, service_id, pkg_id):
+    cc.drop(message)                       # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
+    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
+
     if not message.photo:
-        sent = bot.send_message(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.")
+        sent = cc.show(message.chat.id, "❌ لطفاً تصویر رسید را ارسال کن.", key="err")
         bot.register_next_step_handler(sent, receive_increase_receipt, service_id, pkg_id)
         return
 
     service = _get_owned_service(service_id, message.from_user.id)
     if not service:
-        bot.send_message(message.chat.id, "❌ سرویس پیدا نشد.")
+        cc.show(message.chat.id, "❌ سرویس پیدا نشد.")
         return
 
     pkg = db_execute(
@@ -514,7 +525,7 @@ def receive_increase_receipt(message, service_id, pkg_id):
         fetchone=True
     )
     if not pkg:
-        bot.send_message(message.chat.id, "❌ پلن پیدا نشد.")
+        cc.show(message.chat.id, "❌ پلن پیدا نشد.")
         return
 
     file_id = message.photo[-1].file_id
@@ -530,7 +541,7 @@ def receive_increase_receipt(message, service_id, pkg_id):
         service_id, pkg["duration"], pkg["volume"], now(), now()
     ))
 
-    bot.send_message(
+    cc.show(
         message.chat.id,
         "✅ رسید شما ثبت شد.\n\n"
         "⏳ درخواست افزایش حجم در انتظار بررسی مدیریت است."
