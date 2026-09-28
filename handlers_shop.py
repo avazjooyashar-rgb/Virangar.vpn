@@ -9,7 +9,7 @@ from telebot import types
 from config import bot
 from database import db_execute, get_setting
 from models import internal_user_id, get_user, is_superadmin
-from force_join import force_join_ok
+from force_join import force_join_ok, MENU_SHORTCUTS
 from keyboards import force_join_markup, user_keyboard
 from pasarguard_api import pasarguard_get_user_usage, pasarguard_delete_service
 import chat_clean as cc
@@ -374,6 +374,15 @@ def _get_panel_for_service(service):
 # MY SERVICES — LIST
 # ============================================================
 
+def _no_service_markup():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🛒 خرید سرویس", callback_data="buy_back_home"))
+    if "🎁 تست رایگان" in MENU_SHORTCUTS:
+        idx = MENU_SHORTCUTS.index("🎁 تست رایگان")
+        kb.add(types.InlineKeyboardButton("🎁 دریافت تست رایگان", callback_data=f"go_menu:{idx}"))
+    return kb
+
+
 @bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
 def my_services(message):
     cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
@@ -383,7 +392,8 @@ def my_services(message):
         cc.show(
             message.chat.id,
             "📭 شما هنوز سرویسی ندارید.\n\n"
-            "برای خرید یا دریافت تست رایگان از منوی اصلی اقدام کنید."
+            "می‌تونی از دکمه‌های زیر یه سرویس بخری یا اول یه تست رایگان بگیری:",
+            reply_markup=_no_service_markup()
         )
         return
 
