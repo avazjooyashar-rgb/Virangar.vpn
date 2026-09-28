@@ -10,6 +10,7 @@ from config import bot, BOT_NAME
 from database import get_setting
 from models import ensure_user, is_superadmin
 from keyboards import user_keyboard, force_join_markup
+import chat_clean as cc
 
 
 # بخش‌هایی که ادمین می‌تونه از پیام همگانی «میان‌بر» بهشون بسازه.
@@ -68,14 +69,11 @@ def _send_start(chat_id, from_user):
     user = ensure_user(from_user)
 
     if user["is_blocked"]:
-        bot.send_message(
-            chat_id,
-            "⛔ حساب شما مسدود شده است."
-        )
+        cc.show(chat_id, "⛔ حساب شما مسدود شده است.")
         return
 
     if not force_join_ok(from_user.id):
-        bot.send_message(
+        cc.show(
             chat_id,
             _force_join_message_text(),
             reply_markup=force_join_markup(),
@@ -89,7 +87,7 @@ def _send_start(chat_id, from_user):
         "از منوی زیر سرویس موردنظر خود را انتخاب کنید."
     )
 
-    bot.send_message(
+    cc.show(
         chat_id,
         text,
         reply_markup=user_keyboard(
@@ -103,6 +101,7 @@ def start(message):
     # اگه از یه مرحله‌ی نیمه‌کاره‌ی پنل ادمین (broadcast/force-join) هندلری
     # روی این چت رجیستر مونده باشه، پاکش می‌کنیم تا جلوی /start رو نگیره.
     bot.clear_step_handler_by_chat_id(message.chat.id)
+    cc.drop(message)  # خود /start کاربر هم پاک بشه تا چت تمیز بمونه
     _send_start(message.chat.id, message.from_user)
 
 
@@ -111,6 +110,7 @@ def start(message):
 def go_start(call):
     bot.answer_callback_query(call.id)
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # پیام همگانی پاک بشه
     _send_start(call.message.chat.id, call.from_user)
 
 
@@ -129,16 +129,17 @@ def go_menu(call):
     user = ensure_user(call.from_user)
 
     if user["is_blocked"]:
-        bot.send_message(chat_id, "⛔ حساب شما مسدود شده است.")
+        cc.show(chat_id, "⛔ حساب شما مسدود شده است.")
         return
 
     if not force_join_ok(call.from_user.id):
-        bot.send_message(
+        cc.show(
             chat_id,
             _force_join_message_text(),
             reply_markup=force_join_markup(),
             parse_mode="HTML"
         )
+        cc.safe_delete(chat_id, call.message.message_id)
         return
 
     bot.clear_step_handler_by_chat_id(chat_id)
@@ -147,6 +148,10 @@ def go_menu(call):
     fake.from_user = call.from_user
     fake.text = label
     bot.process_new_messages([fake])
+
+    # پیام همگانی و صفحه‌ی قبلی پاک میشن، فقط بخش جدید می‌مونه
+    cc.drop_screen(chat_id)
+    cc.delete_later(chat_id, call.message.message_id, delay=1.0)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_join")
@@ -157,7 +162,8 @@ def check_join(call):
             "🎉 عضویت تأیید شد!"
         )
 
-        bot.send_message(
+        cc.safe_delete(call.message.chat.id, call.message.message_id)
+        cc.show(
             call.message.chat.id,
             "✅ خوش اومدی! حالا می‌تونی از همه‌ی امکانات ربات استفاده کنی 🚀",
             reply_markup=user_keyboard(
