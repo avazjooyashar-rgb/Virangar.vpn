@@ -259,6 +259,7 @@ def admin_force_join(message):
         reply_markup=_fj_menu_markup(), parse_mode="HTML"
     )
     _state[message.chat.id] = {"flow": "fj", "msg_id": sent.message_id}
+    cc.track(message.chat.id, sent.message_id, "admin_menu")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "fj_menu")
@@ -482,6 +483,7 @@ def broadcast_entry(message):
         reply_markup=_bc_hub_markup(), parse_mode="HTML"
     )
     _state[chat_id] = {"flow": "bc", "msg_id": sent.message_id, "text": None, "rows": [[]]}
+    cc.track(chat_id, sent.message_id, "admin_menu")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "bc_hub")
