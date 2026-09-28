@@ -12,6 +12,7 @@ from config import bot, SUPER_ADMIN_ID
 from database import db_execute, get_setting, now
 from models import get_user, is_admin, internal_user_id
 from keyboards import user_keyboard, admin_keyboard
+import chat_clean as cc
 
 
 def is_support_staff(tg_id):
@@ -70,18 +71,23 @@ def add_message(ticket_id, sender_telegram_id, text):
     """, (ticket_id, sender_telegram_id, text or "", now()))
 
 
-def safe_edit(chat_id, message_id, text, kb):
-    try:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
-        return True
-    except Exception:
-        return False
-
-
-def render(chat_id, text, kb, message_id=None):
-    if message_id and safe_edit(chat_id, message_id, text, kb):
-        return
-    bot.send_message(chat_id, text, reply_markup=kb)
+def render(chat_id, text, kb, message_id=None, key="main"):
+    """
+    یه پیامِ «صفحه‌ی فعلی» رو نشون می‌ده: اگه message_id داده بشه همون
+    پیام ادیت میشه (مسیر معمول کلیک روی دکمه‌های inline)، وگرنه (یا اگه
+    ادیت شکست بخوره) پیام تازه‌ای با cc.show فرستاده میشه که صفحه‌ی
+    قبلیِ همین کلید (کاربر یا ادمین) رو خودش پاک می‌کنه.
+    برمی‌گردونه: آیدیِ پیامِ صفحه (برای رجیستر مرحله‌ی بعد لازم نیست،
+    ولی برای reask کردن رو همون پیام به‌کار میاد).
+    """
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+            return message_id
+        except Exception:
+            pass
+    sent = cc.show(chat_id, text, key=key, reply_markup=kb)
+    return sent.message_id if sent else None
 
 
 def relative_time(dt_str):
@@ -140,6 +146,7 @@ def last_message_preview(ticket_id, limit=40):
 # که می‌زندش، حتی سوپرادمین) فرم کاربر رو باز می‌کنه.
 @bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی")
 def user_support_entry(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     render_user_menu(message.chat.id)
 
 
@@ -160,18 +167,15 @@ def render_user_menu(chat_id, message_id=None):
         "🆘 <b>مرکز پشتیبانی</b>\n\n"
         "برای ارتباط با پشتیبانی تیکت ایجاد کن یا تیکت‌های قبلیت رو ببین.",
         kb,
-        message_id
+        message_id,
+        key="main"
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sup:back_main")
 def sup_back_main(call):
     bot.answer_callback_query(call.id)
-    try:
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    except Exception:
-        pass
-    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=user_keyboard())
+    cc.show(call.message.chat.id, "🏠 بازگشت به منوی اصلی", key="main", reply_markup=user_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sup:menu")
@@ -183,19 +187,19 @@ def sup_menu_cb(call):
 @bot.callback_query_handler(func=lambda call: call.data == "sup:new")
 def sup_new(call):
     bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sup:cancel_new"))
 
-    try:
-        bot.edit_message_text(
-            "🎫 <b>تیکت جدید</b>\n\nموضوع یا متن مشکل خودت رو بنویس و بفرست:",
-            call.message.chat.id, call.message.message_id, reply_markup=kb
-        )
-    except Exception:
-        bot.send_message(call.message.chat.id, "🎫 موضوع یا متن مشکل خودت رو بنویس و بفرست:", reply_markup=kb)
-
-    bot.register_next_step_handler(call.message, create_ticket)
+    render(
+        chat_id,
+        "🎫 <b>تیکت جدید</b>\n\nموضوع یا متن مشکل خودت رو بنویس و بفرست:",
+        kb,
+        call.message.message_id,
+        key="main"
+    )
+    bot.register_next_step_handler_by_chat_id(chat_id, create_ticket)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sup:cancel_new")
@@ -206,9 +210,14 @@ def sup_cancel_new(call):
 
 
 def create_ticket(message):
+    chat_id = message.chat.id
+    cc.drop(message)  # متن تیکتی که کاربر تایپ کرده پاک بشه
+
     if not (message.text or "").strip():
-        msg = bot.send_message(message.chat.id, "❌ متن خالیه. یه توضیح برای مشکلت بفرست:")
-        bot.register_next_step_handler(msg, create_ticket)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sup:cancel_new"))
+        msg_id = render(chat_id, "❌ متن خالیه. یه توضیح برای مشکلت بفرست:", kb, cc.get_screen(chat_id, "main"), key="main")
+        bot.register_next_step_handler_by_chat_id(chat_id, create_ticket)
         return
 
     user_id = internal_user_id(message.from_user.id)
@@ -230,11 +239,13 @@ def create_ticket(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به پشتیبانی", callback_data="sup:menu"))
 
-    bot.send_message(
-        message.chat.id,
+    render(
+        chat_id,
         f"✅ تیکت <b>#{ticket['id']}</b> ثبت شد.\n\n"
         "پشتیبانی به‌زودی پاسخ می‌ده. جواب همینجا برات ارسال میشه.",
-        reply_markup=kb
+        kb,
+        cc.get_screen(chat_id, "main"),
+        key="main"
     )
 
     if SUPER_ADMIN_ID:
@@ -243,6 +254,8 @@ def create_ticket(message):
             types.InlineKeyboardButton("✍️ پاسخ", callback_data=f"asup:reply:{ticket['id']}"),
             types.InlineKeyboardButton("📂 مشاهده", callback_data=f"asup:view:{ticket['id']}"),
         )
+        # اعلان به سوپرادمین یه چت جداست؛ عمداً به سیستم پاک‌سازیِ چتِ
+        # کاربر ربطی نداره و دست‌نخورده می‌مونه.
         bot.send_message(
             SUPER_ADMIN_ID,
             f"🎫 <b>تیکت جدید #{ticket['id']}</b>\n\n"
@@ -272,7 +285,7 @@ def render_user_ticket_list(from_telegram_id, chat_id, message_id=None):
 
     if not tickets:
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sup:menu"))
-        render(chat_id, "📭 هنوز تیکتی ثبت نکردی.", kb, message_id)
+        render(chat_id, "📭 هنوز تیکتی ثبت نکردی.", kb, message_id, key="main")
         return
 
     for t in tickets:
@@ -281,7 +294,7 @@ def render_user_ticket_list(from_telegram_id, chat_id, message_id=None):
 
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sup:menu"))
 
-    render(chat_id, "📂 <b>تیکت‌های من</b>\n\nروی هرکدوم بزن تا مکالمه رو ببینی:", kb, message_id)
+    render(chat_id, "📂 <b>تیکت‌های من</b>\n\nروی هرکدوم بزن تا مکالمه رو ببینی:", kb, message_id, key="main")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sup:view:"))
@@ -327,7 +340,7 @@ def render_user_ticket_view(ticket_id, chat_id, message_id=None):
 
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="sup:mine"))
 
-    render(chat_id, "\n".join(lines), kb, message_id)
+    render(chat_id, "\n".join(lines), kb, message_id, key="main")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sup:reply:"))
@@ -340,30 +353,29 @@ def sup_reply_start(call):
         return
 
     bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"sup:view:{ticket_id}"))
 
-    try:
-        bot.edit_message_text(
-            f"✍️ پیامت رو برای تیکت #{ticket_id} بفرست:",
-            call.message.chat.id, call.message.message_id, reply_markup=kb
-        )
-    except Exception:
-        bot.send_message(call.message.chat.id, f"✍️ پیامت رو برای تیکت #{ticket_id} بفرست:", reply_markup=kb)
-
-    bot.register_next_step_handler(call.message, user_reply_save, ticket_id)
+    render(chat_id, f"✍️ پیامت رو برای تیکت #{ticket_id} بفرست:", kb, call.message.message_id, key="main")
+    bot.register_next_step_handler_by_chat_id(chat_id, user_reply_save, ticket_id)
 
 
 def user_reply_save(message, ticket_id):
+    chat_id = message.chat.id
+    cc.drop(message)  # پیامی که کاربر تایپ کرده پاک بشه
+
     if not (message.text or "").strip():
-        msg = bot.send_message(message.chat.id, "❌ متن خالیه. دوباره بفرست:")
-        bot.register_next_step_handler(msg, user_reply_save, ticket_id)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"sup:view:{ticket_id}"))
+        render(chat_id, "❌ متن خالیه. دوباره بفرست:", kb, cc.get_screen(chat_id, "main"), key="main")
+        bot.register_next_step_handler_by_chat_id(chat_id, user_reply_save, ticket_id)
         return
 
     ticket = get_ticket(ticket_id)
     if not ticket:
-        bot.send_message(message.chat.id, "❌ این تیکت دیگه وجود نداره.")
+        cc.show(chat_id, "❌ این تیکت دیگه وجود نداره.", key="main")
         return
 
     add_message(ticket_id, message.from_user.id, message.text)
@@ -371,7 +383,7 @@ def user_reply_save(message, ticket_id):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به تیکت", callback_data=f"sup:view:{ticket_id}"))
-    bot.send_message(message.chat.id, "✅ پیامت ارسال شد.", reply_markup=kb)
+    render(chat_id, "✅ پیامت ارسال شد.", kb, cc.get_screen(chat_id, "main"), key="main")
 
     if SUPER_ADMIN_ID:
         akb = types.InlineKeyboardMarkup()
@@ -399,6 +411,8 @@ def user_reply_save(message, ticket_id):
 # بیشتر نگه می‌داریم (اگه یه‌جای دیگه هم صدا زده بشه).
 @bot.message_handler(func=lambda m: m.text == "🎫 مدیریت تیکت‌ها" and is_support_staff(m.from_user.id))
 def admin_support_entry(message):
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     render_admin_menu(message.chat.id)
 
 
@@ -441,7 +455,7 @@ def render_admin_menu(chat_id, message_id=None):
         f"💬 پاسخ‌داده‌شده: <b>{answered_count}</b>\n"
         f"🔒 بسته‌شده: <b>{closed_count}</b>"
         f"{warning}",
-        kb, message_id
+        kb, message_id, key="admin_menu"
     )
 
 
@@ -450,11 +464,7 @@ def asup_back_main(call):
     if not is_support_staff(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
-    try:
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    except Exception:
-        pass
-    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=admin_keyboard())
+    cc.show(call.message.chat.id, "🏠 بازگشت به منوی اصلی", key="admin_menu", reply_markup=admin_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "asup:menu")
@@ -507,7 +517,7 @@ def render_admin_ticket_list(scope, page, chat_id, message_id=None):
 
     if not tickets:
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="asup:menu"))
-        render(chat_id, f"{title}\n\n📭 موردی پیدا نشد.", kb, message_id)
+        render(chat_id, f"{title}\n\n📭 موردی پیدا نشد.", kb, message_id, key="admin_menu")
         return
 
     for t in tickets:
@@ -528,7 +538,7 @@ def render_admin_ticket_list(scope, page, chat_id, message_id=None):
 
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به منو", callback_data="asup:menu"))
 
-    render(chat_id, f"{title}\n\n{total} مورد، صفحه {page+1}", kb, message_id)
+    render(chat_id, f"{title}\n\n{total} مورد، صفحه {page+1}", kb, message_id, key="admin_menu")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:view:"))
@@ -549,7 +559,7 @@ def render_admin_ticket_view(ticket_id, chat_id, message_id=None, scope="open", 
     if not ticket:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="asup:menu"))
-        render(chat_id, "❌ تیکت پیدا نشد.", kb, message_id)
+        render(chat_id, "❌ تیکت پیدا نشد.", kb, message_id, key="admin_menu")
         return
 
     owner_tg_id = get_owner_telegram_id(ticket["user_id"])
@@ -577,7 +587,7 @@ def render_admin_ticket_view(ticket_id, chat_id, message_id=None, scope="open", 
 
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f"asup:list:{scope}:{page}"))
 
-    render(chat_id, "\n".join(lines), kb, message_id)
+    render(chat_id, "\n".join(lines), kb, message_id, key="admin_menu")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("asup:reply:"))
@@ -600,30 +610,29 @@ def asup_reply_start(call):
         return
 
     bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"asup:view:{ticket_id}:{scope}:{page}"))
 
-    try:
-        bot.edit_message_text(
-            f"✍️ پاسخت رو برای تیکت #{ticket_id} بنویس و بفرست:",
-            call.message.chat.id, call.message.message_id, reply_markup=kb
-        )
-    except Exception:
-        bot.send_message(call.message.chat.id, f"✍️ پاسخت رو برای تیکت #{ticket_id} بنویس و بفرست:", reply_markup=kb)
-
-    bot.register_next_step_handler(call.message, admin_reply_save, ticket_id, scope, page)
+    render(chat_id, f"✍️ پاسخت رو برای تیکت #{ticket_id} بنویس و بفرست:", kb, call.message.message_id, key="admin_menu")
+    bot.register_next_step_handler_by_chat_id(chat_id, admin_reply_save, ticket_id, scope, page)
 
 
 def admin_reply_save(message, ticket_id, scope="open", page="0"):
+    chat_id = message.chat.id
+    cc.drop(message)  # پاسخی که ادمین تایپ کرده پاک بشه
+
     if not (message.text or "").strip():
-        msg = bot.send_message(message.chat.id, "❌ متن خالیه. دوباره بفرست:")
-        bot.register_next_step_handler(msg, admin_reply_save, ticket_id, scope, page)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"asup:view:{ticket_id}:{scope}:{page}"))
+        render(chat_id, "❌ متن خالیه. دوباره بفرست:", kb, cc.get_screen(chat_id, "admin_menu"), key="admin_menu")
+        bot.register_next_step_handler_by_chat_id(chat_id, admin_reply_save, ticket_id, scope, page)
         return
 
     ticket = get_ticket(ticket_id)
     if not ticket:
-        bot.send_message(message.chat.id, "❌ این تیکت دیگه وجود نداره.")
+        cc.show(chat_id, "❌ این تیکت دیگه وجود نداره.", key="admin_menu")
         return
 
     add_message(ticket_id, message.from_user.id, message.text)
@@ -631,13 +640,15 @@ def admin_reply_save(message, ticket_id, scope="open", page="0"):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به تیکت", callback_data=f"asup:view:{ticket_id}:{scope}:{page}"))
-    bot.send_message(message.chat.id, "✅ پاسخ ارسال شد.", reply_markup=kb)
+    render(chat_id, "✅ پاسخ ارسال شد.", kb, cc.get_screen(chat_id, "admin_menu"), key="admin_menu")
 
     owner_tg_id = get_owner_telegram_id(ticket["user_id"])
     if owner_tg_id:
         ukb = types.InlineKeyboardMarkup()
         ukb.add(types.InlineKeyboardButton("📂 مشاهده تیکت", callback_data=f"sup:view:{ticket_id}"))
         try:
+            # این اعلان تو چتِ کاربره، نه ادمین؛ خارج از فلوی صفحه‌ی
+            # فعلیِ کاربره پس دست‌نخورده (بدون ردیابی) باقی می‌مونه.
             bot.send_message(
                 owner_tg_id,
                 f"💬 <b>پاسخ جدید برای تیکت #{ticket_id}</b>\n\n{esc(message.text)}",
