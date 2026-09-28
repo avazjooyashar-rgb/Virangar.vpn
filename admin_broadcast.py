@@ -29,6 +29,7 @@ from database import db_execute, get_setting, set_setting
 from decorators import admin_only, admin_only_call
 from keyboards import admin_keyboard
 from force_join import MENU_SHORTCUTS
+import chat_clean as cc
 
 
 # state هر ادمین: chat_id -> dict
@@ -157,13 +158,25 @@ def _go_admin_menu(call):
 
     _state.pop(chat_id, None)
 
-    bot.send_message(
+    cc.show(
         chat_id,
         "🏠 منوی مدیریت",
+        key="admin_menu",
         reply_markup=admin_keyboard()
     )
 
     bot.answer_callback_query(call.id)
+
+
+def _clean_before_flow(message):
+    """قبل از شروع یه بخش جدید از منوی ادمین: پیام دکمه‌ی خود ادمین،
+    صفحه‌ی مرحله‌ی قبلی و پیام «منوی مدیریت» رو پاک می‌کنیم."""
+    chat_id = message.chat.id
+    cc.drop(message)
+    old = _state.pop(chat_id, None)
+    if old and old.get("msg_id"):
+        cc.safe_delete(chat_id, old["msg_id"])
+    cc.drop_screen(chat_id, "admin_menu")
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("adm_back", "bc_cancel"))
@@ -240,6 +253,7 @@ def _fj_render(chat_id):
 @admin_only
 def admin_force_join(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
+    _clean_before_flow(message)
     sent = bot.send_message(
         message.chat.id, _fj_text(),
         reply_markup=_fj_menu_markup(), parse_mode="HTML"
@@ -460,6 +474,7 @@ def _bc_render_hub(chat_id, message_id):
 def broadcast_entry(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
+    _clean_before_flow(message)
 
     sent = bot.send_message(
         chat_id,
