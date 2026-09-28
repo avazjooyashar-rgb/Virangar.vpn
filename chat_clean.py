@@ -22,6 +22,13 @@ from config import bot
 _last = {}
 _lock = threading.Lock()
 
+# وقتی یه «صفحه‌ی» جدید با این کلید نمایش داده میشه، پیام‌های موقتِ وابسته‌ش هم پاک میشن
+# (مثلاً پیام خطا کنار صفحه‌ی کاربر، یا عکس رسید کنار صفحه‌ی مدیر)
+_LINKED = {
+    "main": ["err"],
+    "admin_menu": ["admin_receipt"],
+}
+
 
 def safe_delete(chat_id, message_id):
     try:
@@ -54,9 +61,17 @@ def drop_screen(chat_id, key="main"):
         safe_delete(chat_id, old)
 
 
+def track(chat_id, message_id, key="main"):
+    """پیامی که خودمون (بیرون از show) فرستادیم رو به‌عنوان «صفحه‌ی فعلی» ثبت می‌کنه."""
+    with _lock:
+        _last[(chat_id, key)] = message_id
+
+
 def show(chat_id, text, key="main", **kwargs):
     """پیام جدید می‌فرسته و صفحه‌ی قبلیِ همین کلید رو پاک می‌کنه."""
     drop_screen(chat_id, key)
+    for linked in _LINKED.get(key, []):
+        drop_screen(chat_id, linked)
     sent = bot.send_message(chat_id, text, **kwargs)
     with _lock:
         _last[(chat_id, key)] = sent.message_id
