@@ -49,24 +49,19 @@ def _force_join_message_text():
     return text or DEFAULT_FORCE_JOIN_MESSAGE
 
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    # اگه از یه مرحله‌ی نیمه‌کاره‌ی پنل ادمین (broadcast/force-join) هندلری
-    # روی این چت رجیستر مونده باشه، پاکش می‌کنیم تا جلوی /start رو نگیره.
-    bot.clear_step_handler_by_chat_id(message.chat.id)
-
-    user = ensure_user(message.from_user)
+def _send_start(chat_id, from_user):
+    user = ensure_user(from_user)
 
     if user["is_blocked"]:
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "⛔ حساب شما مسدود شده است."
         )
         return
 
-    if not force_join_ok(message.from_user.id):
+    if not force_join_ok(from_user.id):
         bot.send_message(
-            message.chat.id,
+            chat_id,
             _force_join_message_text(),
             reply_markup=force_join_markup(),
             parse_mode="HTML"
@@ -80,12 +75,28 @@ def start(message):
     )
 
     bot.send_message(
-        message.chat.id,
+        chat_id,
         text,
         reply_markup=user_keyboard(
-            is_super_admin=is_superadmin(message.from_user.id)
+            is_super_admin=is_superadmin(from_user.id)
         )
     )
+
+
+@bot.message_handler(commands=["start"])
+def start(message):
+    # اگه از یه مرحله‌ی نیمه‌کاره‌ی پنل ادمین (broadcast/force-join) هندلری
+    # روی این چت رجیستر مونده باشه، پاکش می‌کنیم تا جلوی /start رو نگیره.
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    _send_start(message.chat.id, message.from_user)
+
+
+# دکمه‌ی «استارت» داخل پیام‌های همگانی: همون کار /start رو مستقیم تو همون چت انجام میده
+@bot.callback_query_handler(func=lambda call: call.data == "go_start")
+def go_start(call):
+    bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _send_start(call.message.chat.id, call.from_user)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_join")
