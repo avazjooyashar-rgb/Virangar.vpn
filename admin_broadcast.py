@@ -14,7 +14,13 @@
 #     هم پاک می‌کنیم تا هیچ‌وقت پیام بعدی (مثلاً /start) رو قورت نده.
 # ============================================================
 
+import html
+import json
+import logging
+import os
+import threading
 import time
+from datetime import datetime
 
 from telebot import types
 
@@ -29,10 +35,74 @@ from keyboards import admin_keyboard
 # bc  -> ارسال همگانی
 _state = {}
 
-# آرشیو موقتِ (در حافظه) پیام‌های همگانیِ اخیر، برای امکان «حذف از همه»
-# bcid -> {"recipients": [(chat_id, message_id), ...], "sent": int, "failed": int}
-_sent_broadcasts = {}
-_broadcast_seq = 0
+# سوابق پیام‌های همگانی روی فایل ذخیره میشه (با ری‌استارت ربات هم از بین نمیره)
+# هر آیتم: {"id", "ts", "text", "sent", "failed", "recipients": [[chat_id, msg_id], ...], "deleted"}
+_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast_history.json")
+_HISTORY_KEEP = 20
+_hist_lock = threading.Lock()
+
+
+def _hist_load():
+    try:
+        with open(_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _hist_save(items):
+    try:
+        tmp = _HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+        os.replace(tmp, _HISTORY_FILE)
+    except Exception as e:
+        logging.warning("Broadcast history save: %s", e)
+
+
+def _hist_add(text, recipients, sent, failed):
+    with _hist_lock:
+        items = _hist_load()
+        new_id = max([i.get("id", 0) for i in items], default=0) + 1
+        items.append({
+            "id": new_id,
+            "ts": datetime.now().strftime("%m/%d %H:%M"),
+            "text": text,
+            "sent": sent,
+            "failed": failed,
+            "recipients": [list(r) for r in recipients],
+            "deleted": False,
+        })
+        _hist_save(items[-_HISTORY_KEEP:])
+        return new_id
+
+
+def _hist_get(bcid):
+    for i in _hist_load():
+        if i.get("id") == bcid:
+            return i
+    return None
+
+
+def _hist_update(bcid, **fields):
+    with _hist_lock:
+        items = _hist_load()
+        for i in items:
+            if i.get("id") == bcid:
+                i.update(fields)
+        _hist_save(items)
+
+
+def _ensure_bc_state(call):
+    """اگه ربات ری‌استارت شده یا state پریده، از روی همین پیام دوباره می‌سازیم."""
+    chat_id = call.message.chat.id
+    st = _state.get(chat_id)
+    if not st or st.get("flow") != "bc":
+        st = {"flow": "bc", "text": None, "rows": [[]]}
+        _state[chat_id] = st
+    st["msg_id"] = call.message.message_id
+    return st
 
 _bot_username = None
 
@@ -41,10 +111,10 @@ def _get_bot_username():
     global _bot_username
     if _bot_username is None:
         try:
-            _bot_username = bot.get_me().username
+            _bot_username = bot.get_me().username or None
         except Exception:
-            _bot_username = ""
-    return _bot_username
+            _bot_username = None
+    return _bot_username or ""
 
 
 def _safe_delete(message):
@@ -351,7 +421,7 @@ def _bc_users_count():
 
 def _bc_ask_text(chat_id, message_id):
     m = types.InlineKeyboardMarkup()
-    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    m.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_hub"))
     try:
         bot.edit_message_text(
             "📢 <b>پیام همگانی جدید</b>\n\nمتنی که می‌خوای برای همه ارسال بشه رو بفرست:",
@@ -362,22 +432,110 @@ def _bc_ask_text(chat_id, message_id):
     bot.register_next_step_handler_by_chat_id(chat_id, _bc_text_received)
 
 
+def _bc_hub_markup():
+    m = types.InlineKeyboardMarkup()
+    m.row(types.InlineKeyboardButton("📝 نوشتن پیام جدید", callback_data="bc_new"))
+    hist = _hist_load()
+    if hist:
+        m.row(types.InlineKeyboardButton(
+            f"🗂 پیام‌های قبلی / حذف از همه ({len(hist)})", callback_data="bc_history"
+        ))
+    m.row(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    return m
+
+
+def _bc_render_hub(chat_id, message_id):
+    try:
+        bot.edit_message_text(
+            "📢 <b>ارسال همگانی</b>\n\nچیکار می‌خوای بکنی؟",
+            chat_id, message_id, reply_markup=_bc_hub_markup(), parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
 @bot.message_handler(func=lambda m: m.text == "📢 ارسال همگانی")
 @admin_only
 def broadcast_entry(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
 
-    m = types.InlineKeyboardMarkup()
-    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
-
     sent = bot.send_message(
         chat_id,
-        "📢 <b>پیام همگانی جدید</b>\n\nمتنی که می‌خوای برای همه ارسال بشه رو بفرست:",
-        reply_markup=m, parse_mode="HTML"
+        "📢 <b>ارسال همگانی</b>\n\nچیکار می‌خوای بکنی؟",
+        reply_markup=_bc_hub_markup(), parse_mode="HTML"
     )
     _state[chat_id] = {"flow": "bc", "msg_id": sent.message_id, "text": None, "rows": [[]]}
-    bot.register_next_step_handler_by_chat_id(chat_id, _bc_text_received)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_hub")
+@admin_only_call
+def cb_bc_hub(call):
+    _ensure_bc_state(call)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _bc_render_hub(call.message.chat.id, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_new")
+@admin_only_call
+def cb_bc_new(call):
+    st = _ensure_bc_state(call)
+    chat_id = call.message.chat.id
+    st["text"] = None
+    st["rows"] = [[]]
+    _bc_ask_text(chat_id, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+
+def _bc_preview_of(text, length=35):
+    text = (text or "").strip().replace("\n", " ")
+    return (text[:length] + "…") if len(text) > length else (text or "—")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "bc_history")
+@admin_only_call
+def cb_bc_history(call):
+    _ensure_bc_state(call)
+    chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    hist = _hist_load()
+    if not hist:
+        bot.answer_callback_query(call.id, "چیزی برای نمایش نیست.", show_alert=True)
+        return
+
+    m = types.InlineKeyboardMarkup()
+    for rec in sorted(hist, key=lambda r: r.get("id", 0), reverse=True):
+        mark = "✅" if rec.get("deleted") else "🕒"
+        label = f"{mark} {rec.get('ts', '')} · {_bc_preview_of(rec.get('text'), 22)} ({rec.get('sent', 0)})"
+        m.row(types.InlineKeyboardButton(label, callback_data=f"bc_hist_view:{rec['id']}"))
+    m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_hub"))
+
+    try:
+        bot.edit_message_text(
+            "🗂 <b>پیام‌های همگانی قبلی</b>\n\n🕒 = فعال  |  ✅ = حذف شده\nهر کدوم رو بزنی می‌تونی از همه حذفش کنی.",
+            chat_id, call.message.message_id, reply_markup=m, parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bc_hist_view:"))
+@admin_only_call
+def cb_bc_hist_view(call):
+    _ensure_bc_state(call)
+    bcid = int(call.data.split(":", 1)[1])
+    rec = _hist_get(bcid)
+
+    if not rec:
+        bot.answer_callback_query(call.id, "⛔ این پیام دیگه در دسترس نیست.", show_alert=True)
+        return
+
+    _bc_render_broadcast_item(call.message.chat.id, call.message.message_id, bcid, rec)
+    bot.answer_callback_query(call.id)
 
 
 def _bc_text_received(message):
@@ -393,8 +551,7 @@ def _bc_text_received(message):
 @bot.callback_query_handler(func=lambda c: c.data == "bc_edit_text")
 @admin_only_call
 def cb_bc_edit_text(call):
-    if not _check_state(call, "bc"):
-        return
+    _ensure_bc_state(call)
     chat_id = call.message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
     _bc_ask_text(chat_id, call.message.message_id)
@@ -412,7 +569,7 @@ def _bc_render_manage(chat_id):
 
     text = (
         "🚀 <b>ساخت پیام همگانی</b>\n\n"
-        f"{st['text']}\n\n"
+        f"{html.escape(st['text'] or '')}\n\n"
         f"🔘 دکمه‌ها:\n{_bc_buttons_desc(st['rows'])}\n\n"
         f"👥 گیرنده‌ها در حال حاضر: {count} نفر"
     )
@@ -577,8 +734,9 @@ def cb_bc_type_start(call):
         return
     chat_id = call.message.chat.id
     bot.edit_message_text(
-        "🚀 پارامتر start رو بفرست.\n"
-        "اگه نمی‌خوای پارامتر خاصی بذاری، فقط بنویس: -",
+        "🚀 اگه می‌خوای دکمه با پارامتر خاص (دیپ‌لینک) باز بشه، پارامتر رو بفرست.\n"
+        "اگه نمی‌خوای، فقط بنویس: -\n"
+        "(بدون پارامتر، دکمه مستقیم همون /start رو تو همون چت اجرا می‌کنه)",
         chat_id, call.message.message_id,
         reply_markup=_bc_value_back_markup()
     )
@@ -635,11 +793,13 @@ def _bc_build_user_markup(rows):
             if b["type"] == "url":
                 btns.append(types.InlineKeyboardButton(b["text"], url=b["value"]))
             elif b["type"] == "start":
-                if b["value"]:
+                if b["value"] and username:
+                    # دیپ‌لینک با پارامتر: ربات با /start <param> باز میشه
                     url = f"https://t.me/{username}?start={b['value']}"
+                    btns.append(types.InlineKeyboardButton(b["text"], url=url))
                 else:
-                    url = f"https://t.me/{username}"
-                btns.append(types.InlineKeyboardButton(b["text"], url=url))
+                    # بدون پارامتر: همون /start رو مستقیم تو همون چت اجرا می‌کنه
+                    btns.append(types.InlineKeyboardButton(b["text"], callback_data="go_start"))
             elif b["type"] == "check_join":
                 btns.append(types.InlineKeyboardButton(b["text"], callback_data="check_join"))
         if btns:
@@ -680,7 +840,7 @@ def _bc_render_preview(chat_id):
 
     text = (
         "👁 <b>پیش‌نمایش نهایی</b>\n\n"
-        f"{st['text']}\n\n"
+        f"{html.escape(st['text'] or '')}\n\n"
         f"👥 گیرنده‌ها: {count} نفر\n"
         f"⏱ زمان تقریبی ارسال: {eta}\n\n"
         "این دقیقاً همون چیزیه که کاربرا می‌بینن. ارسال بشه؟"
@@ -692,17 +852,28 @@ def _bc_render_preview(chat_id):
         pass
 
 
-def _bc_render_result(chat_id, message_id, bcid, rec):
+def _bc_render_broadcast_item(chat_id, message_id, bcid, rec, just_sent=False):
+    remaining = len(rec.get("recipients") or [])
+    deleted = rec.get("deleted")
+
     m = types.InlineKeyboardMarkup()
-    if rec.get("recipients"):
+    if remaining and not deleted:
         m.row(types.InlineKeyboardButton("🗑 حذف این پیام از همه", callback_data=f"bc_del_ask:{bcid}"))
-    m.row(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    if just_sent:
+        m.row(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    else:
+        m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_history"))
+
+    title = "✅ <b>ارسال انجام شد</b>" if just_sent else f"📨 <b>پیام همگانی #{bcid}</b>"
+    status = "✅ از همه حذف شده" if deleted else f"🕒 فعال | قابل حذف برای {remaining} نفر"
 
     try:
         bot.edit_message_text(
-            f"✅ <b>ارسال انجام شد</b>\n\n"
-            f"موفق: {rec['sent']}\n"
-            f"ناموفق: {rec['failed']}",
+            f"{title}\n\n"
+            f"{html.escape(rec.get('text') or '')}\n\n"
+            f"📅 {rec.get('ts', '')}\n"
+            f"موفق: {rec.get('sent', 0)} | ناموفق: {rec.get('failed', 0)}\n"
+            f"{status}",
             chat_id, message_id, reply_markup=m, parse_mode="HTML"
         )
     except Exception:
@@ -714,8 +885,6 @@ def _bc_render_result(chat_id, message_id, bcid, rec):
 def cb_bc_confirm(call):
     if not _check_state(call, "bc"):
         return
-
-    global _broadcast_seq
 
     chat_id = call.message.chat.id
     st = _state[chat_id]
@@ -737,14 +906,8 @@ def cb_bc_confirm(call):
         except Exception:
             failed += 1
 
-    _broadcast_seq += 1
-    bcid = _broadcast_seq
-    _sent_broadcasts[bcid] = {"recipients": recipients, "sent": sent, "failed": failed}
-
-    if len(_sent_broadcasts) > 15:
-        _sent_broadcasts.pop(min(_sent_broadcasts.keys()), None)
-
-    _bc_render_result(chat_id, st["msg_id"], bcid, _sent_broadcasts[bcid])
+    bcid = _hist_add(st["text"], recipients, sent, failed)
+    _bc_render_broadcast_item(chat_id, st["msg_id"], bcid, _hist_get(bcid), just_sent=True)
 
     st["text"] = None
     st["rows"] = [[]]
@@ -755,10 +918,10 @@ def cb_bc_confirm(call):
 @admin_only_call
 def cb_bc_del_ask(call):
     bcid = int(call.data.split(":", 1)[1])
-    rec = _sent_broadcasts.get(bcid)
+    rec = _hist_get(bcid)
 
-    if not rec:
-        bot.answer_callback_query(call.id, "⛔ این پیام قبلاً حذف شده یا منقضی شده.", show_alert=True)
+    if not rec or rec.get("deleted") or not rec.get("recipients"):
+        bot.answer_callback_query(call.id, "⛔ این پیام قبلاً حذف شده یا در دسترس نیست.", show_alert=True)
         return
 
     m = types.InlineKeyboardMarkup()
@@ -769,8 +932,9 @@ def cb_bc_del_ask(call):
 
     try:
         bot.edit_message_text(
-            f"⚠️ مطمئنی می‌خوای این پیام رو از تمام {len(rec['recipients'])} نفری که "
-            "براشون رفته حذف کنی؟\n\nاین عمل قابل بازگشت نیست.",
+            f"⚠️ مطمئنی می‌خوای این پیام رو از چت {len(rec['recipients'])} نفری که "
+            "براشون رفته حذف کنی؟\n\nاین عمل قابل بازگشت نیست.\n"
+            "(تلگرام فقط تا حدود ۴۸ ساعت بعد از ارسال اجازه‌ی حذف میده)",
             call.message.chat.id, call.message.message_id, reply_markup=m
         )
     except Exception:
@@ -783,13 +947,13 @@ def cb_bc_del_ask(call):
 @admin_only_call
 def cb_bc_del_no(call):
     bcid = int(call.data.split(":", 1)[1])
-    rec = _sent_broadcasts.get(bcid)
+    rec = _hist_get(bcid)
 
     if not rec:
         bot.answer_callback_query(call.id, "⛔ این پیام دیگه در دسترس نیست.", show_alert=True)
         return
 
-    _bc_render_result(call.message.chat.id, call.message.message_id, bcid, rec)
+    _bc_render_broadcast_item(call.message.chat.id, call.message.message_id, bcid, rec)
     bot.answer_callback_query(call.id)
 
 
@@ -797,17 +961,17 @@ def cb_bc_del_no(call):
 @admin_only_call
 def cb_bc_del_go(call):
     bcid = int(call.data.split(":", 1)[1])
-    rec = _sent_broadcasts.pop(bcid, None)
+    rec = _hist_get(bcid)
     chat_id = call.message.chat.id
 
-    if not rec:
+    if not rec or rec.get("deleted") or not rec.get("recipients"):
         bot.answer_callback_query(call.id, "⛔ این پیام دیگه در دسترس نیست.", show_alert=True)
         return
 
     bot.answer_callback_query(call.id, "⏳ در حال حذف...")
 
     deleted = 0
-    failed = 0
+    left = []
 
     for uid, mid in rec["recipients"]:
         try:
@@ -815,14 +979,20 @@ def cb_bc_del_go(call):
             deleted += 1
             time.sleep(0.03)
         except Exception:
-            failed += 1
+            left.append([uid, mid])
+
+    # اونایی که حذف نشدن نگه داشته میشن تا بشه دوباره تلاش کرد
+    _hist_update(bcid, recipients=left, deleted=(not left))
 
     m = types.InlineKeyboardMarkup()
-    m.add(types.InlineKeyboardButton("🔙 بازگشت به منوی مدیریت", callback_data="bc_cancel"))
+    if left:
+        m.row(types.InlineKeyboardButton("🔁 تلاش دوباره برای باقی‌مونده‌ها", callback_data=f"bc_del_ask:{bcid}"))
+    m.row(types.InlineKeyboardButton("🔙 بازگشت به فهرست", callback_data="bc_history"))
 
     try:
         bot.edit_message_text(
-            f"🗑 <b>حذف انجام شد</b>\n\nحذف‌شده: {deleted}\nناموفق: {failed}",
+            f"🗑 <b>حذف انجام شد</b>\n\nحذف‌شده: {deleted}\nحذف‌نشده: {len(left)}\n\n"
+            "حذف‌نشده‌ها معمولاً کسایی‌ان که ربات رو بلاک کردن یا از ارسال بیشتر از ۴۸ ساعت گذشته.",
             chat_id, call.message.message_id, reply_markup=m, parse_mode="HTML"
         )
     except Exception:
