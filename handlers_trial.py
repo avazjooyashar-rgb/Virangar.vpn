@@ -15,6 +15,7 @@ from database import db_execute, get_setting, set_setting, now
 from models import get_user, is_admin
 from pasarguard_api import pasarguard_create_service
 from services import create_local_service
+import chat_clean as cc
 
 
 logger = logging.getLogger(__name__)
@@ -183,13 +184,17 @@ def safe_answer_callback(call, text=None, show_alert=False):
 
 
 def safe_edit_message(text, chat_id, message_id, reply_markup=None):
-    """ویرایش امن پیام؛ اگر پیام حذف شده یا تغییری نکرده باشد، پیام جدید می‌فرستد."""
+    """
+    ویرایش امن پیام؛ اگر پیام حذف شده یا تغییری نکرده باشد، به‌جای
+    ارسال یه پیام یتیمِ ردیابی‌نشده، از cc.show استفاده می‌کنیم تا
+    ردیابیِ «صفحه‌ی فعلی» هم درست بمونه.
+    """
     try:
         bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup)
         return True
     except Exception:
         try:
-            bot.send_message(chat_id, text, reply_markup=reply_markup)
+            cc.show(chat_id, text, reply_markup=reply_markup)
         except Exception:
             logger.exception("safe_edit_message fallback send failed")
         return False
@@ -202,35 +207,37 @@ def safe_edit_message(text, chat_id, message_id, reply_markup=None):
 @bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان")
 def free_trial(message):
     try:
+        cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+        chat_id = message.chat.id
         user = get_user(message.from_user.id)
 
         if get_setting("trial_enabled", "1") != "1":
-            bot.send_message(message.chat.id, "❌ تست رایگان غیرفعال است.")
+            cc.show(chat_id, "❌ تست رایگان غیرفعال است.")
             return
 
         if daily_limit_reached():
-            bot.send_message(message.chat.id, DAILY_LIMIT_MESSAGE)
+            cc.show(chat_id, DAILY_LIMIT_MESSAGE)
             return
 
         limit = int(get_setting("trial_limit", "1"))
         used = count_user_trials(user["id"])
 
         if used >= limit:
-            bot.send_message(message.chat.id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.")
+            cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.")
             return
 
-        msg = bot.send_message(
-            message.chat.id,
+        sent = cc.show(
+            chat_id,
             "🎁 <b>تست رایگان</b>\n\n"
             "برای فعال‌سازی، اول یک نام دلخواه انتخاب کن (فقط حروف/عدد انگلیسی، بدون فاصله):\n\n"
             "مثال: <code>ali</code>"
         )
-        bot.register_next_step_handler(msg, trial_get_name)
+        bot.register_next_step_handler(sent, trial_get_name)
 
     except Exception:
         logger.exception("free_trial handler crashed")
         try:
-            bot.send_message(message.chat.id, GENERIC_ERROR_MESSAGE)
+            cc.show(message.chat.id, GENERIC_ERROR_MESSAGE)
         except Exception:
             pass
 
@@ -241,16 +248,21 @@ def free_trial(message):
 
 def trial_get_name(message):
     try:
+        chat_id = message.chat.id
+        cc.drop(message)                     # نامی که کاربر تایپ کرده پاک بشه
+        cc.drop_screen(chat_id, "err")        # پیام خطای قبلی (اگه بود) پاک بشه
+
         raw = (message.text or "").strip()
 
         if not NAME_PATTERN.match(raw):
-            msg = bot.send_message(
-                message.chat.id,
+            sent = cc.show(
+                chat_id,
                 "❌ نام نامعتبر است.\n\n"
                 "فقط حروف انگلیسی، عدد و آندرلاین مجاز است (بین ۲ تا ۲۰ کاراکتر).\n"
-                "دوباره یک نام ارسال کن:"
+                "دوباره یک نام ارسال کن:",
+                key="err"
             )
-            bot.register_next_step_handler(msg, trial_get_name)
+            bot.register_next_step_handler(sent, trial_get_name)
             return
 
         name = raw.lower()
@@ -258,12 +270,13 @@ def trial_get_name(message):
         final_username = f"{USERNAME_PREFIX}_{name}"        # چیزی که واقعاً روی پنل ساخته می‌شود
 
         if username_taken(final_username):
-            msg = bot.send_message(
-                message.chat.id,
+            sent = cc.show(
+                chat_id,
                 f"❌ نام <code>{name}</code> قبلاً استفاده شده.\n\n"
-                "یک نام دیگر ارسال کن:"
+                "یک نام دیگر ارسال کن:",
+                key="err"
             )
-            bot.register_next_step_handler(msg, trial_get_name)
+            bot.register_next_step_handler(sent, trial_get_name)
             return
 
         kb = types.InlineKeyboardMarkup()
@@ -272,8 +285,9 @@ def trial_get_name(message):
             types.InlineKeyboardButton("❌ انصراف", callback_data="trialcancel"),
         )
 
-        bot.send_message(
-            message.chat.id,
+        # پرامپت مرحله‌ی قبل (و پیام خطای احتمالی) با این صفحه‌ی جدید جایگزین میشه
+        cc.show(
+            chat_id,
             "🔎 مشخصات سرویس تست:\n\n"
             f"👤 نام کاربری: <code>{display_username}</code>\n\n"
             "تایید می‌کنی؟",
@@ -283,7 +297,7 @@ def trial_get_name(message):
     except Exception:
         logger.exception("trial_get_name handler crashed")
         try:
-            bot.send_message(message.chat.id, GENERIC_ERROR_MESSAGE)
+            cc.show(message.chat.id, GENERIC_ERROR_MESSAGE)
         except Exception:
             pass
 
@@ -303,6 +317,7 @@ def trial_cancel(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("trialgo:"))
 def trial_confirm(call):
+    chat_id = call.message.chat.id
     try:
         name = call.data.split(":", 1)[1]
         display_username = f"{USERNAME_PREFIX}.{name}"
@@ -316,7 +331,7 @@ def trial_confirm(call):
 
         if daily_limit_reached():
             safe_answer_callback(call, "❌ سهمیه‌ی امروز تکمیل شده.", show_alert=True)
-            safe_edit_message(DAILY_LIMIT_MESSAGE, call.message.chat.id, call.message.message_id)
+            safe_edit_message(DAILY_LIMIT_MESSAGE, chat_id, call.message.message_id)
             return
 
         limit = int(get_setting("trial_limit", "1"))
@@ -329,8 +344,10 @@ def trial_confirm(call):
         if username_taken(final_username):
             safe_answer_callback(call, "❌ این نام همین الان توسط شخص دیگری گرفته شد.", show_alert=True)
             try:
-                msg = bot.send_message(call.message.chat.id, "یک نام دیگر ارسال کن:")
-                bot.register_next_step_handler(msg, trial_get_name)
+                # صفحه‌ی تاییدِ نام قدیمی پاک میشه، یه پرامپت تازه میاد
+                cc.drop_screen(chat_id)
+                sent = cc.show(chat_id, "یک نام دیگر ارسال کن:")
+                bot.register_next_step_handler(sent, trial_get_name)
             except Exception:
                 logger.exception("re-prompt after username_taken failed")
             return
@@ -351,7 +368,7 @@ def trial_confirm(call):
             return
 
         safe_answer_callback(call, "⏳ در حال ساخت سرویس...")
-        safe_edit_message("⏳ در حال ساخت سرویس تست...", call.message.chat.id, call.message.message_id)
+        safe_edit_message("⏳ در حال ساخت سرویس تست...", chat_id, call.message.message_id)
 
         fake_plan = {
             "id": None,
@@ -372,16 +389,19 @@ def trial_confirm(call):
         except Exception:
             logger.exception("pasarguard_create_service crashed")
             try:
-                bot.send_message(call.message.chat.id, "❌ ساخت تست رایگان انجام نشد (خطای ارتباط با پنل).")
+                cc.drop_screen(chat_id)  # پیام «⏳ در حال ساخت...» پاک بشه
+                cc.show(chat_id, "❌ ساخت تست رایگان انجام نشد (خطای ارتباط با پنل).")
             except Exception:
                 pass
             return
 
         if not result.get("success"):
             try:
-                bot.send_message(
-                    call.message.chat.id,
-                    f"❌ ساخت تست رایگان انجام نشد.\n\n<code>{result.get('error', 'نامشخص')}</code>"
+                cc.drop_screen(chat_id)
+                cc.show(
+                    chat_id,
+                    f"❌ ساخت تست رایگان انجام نشد.\n\n<code>{result.get('error', 'نامشخص')}</code>",
+                    parse_mode="HTML"
                 )
             except Exception:
                 logger.exception("sending failure message crashed")
@@ -392,8 +412,9 @@ def trial_confirm(call):
         except Exception:
             logger.exception("create_local_service crashed")
             try:
-                bot.send_message(
-                    call.message.chat.id,
+                cc.drop_screen(chat_id)
+                cc.show(
+                    chat_id,
                     "⚠️ سرویس روی پنل ساخته شد ولی ثبت داخلی آن با خطا مواجه شد. لطفاً به ادمین اطلاع بده."
                 )
             except Exception:
@@ -410,15 +431,19 @@ def trial_confirm(call):
         volume_display = int(volume) if volume == int(volume) else volume
 
         try:
+            # صفحه‌ی «⏳ در حال ساخت...» پاک میشه؛ پیام موفقیت (با لینک اشتراک)
+            # عمداً ردیابی/پاک‌سازی خودکار نمیشه تا کاربر لینکش رو از دست نده.
+            cc.drop_screen(chat_id)
             bot.send_message(
-                call.message.chat.id,
+                chat_id,
                 "🎁 <b>تست رایگان فعال شد!</b>\n\n"
                 f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n"
                 f"📊 حجم: {volume_display} GB\n"
                 f"⏳ مدت: {duration} روز\n"
                 f"📱 دستگاه: {devices}\n\n"
                 f"🔗 لینک اشتراک:\n"
-                f"<code>{service['config']}</code>"
+                f"<code>{service['config']}</code>",
+                parse_mode="HTML"
             )
         except Exception:
             logger.exception("sending success message crashed")
@@ -500,12 +525,15 @@ def render_trial_settings(chat_id, message_id=None):
                 return
             return
 
-        bot.send_message(chat_id, text, reply_markup=kb)
+        # ورود اولیه به پنل: صفحه‌ی مدیریت قبلی پاک میشه و این به‌عنوان
+        # «صفحه‌ی فعلی ادمین» ردیابی میشه (مثل بقیه‌ی پنل‌های مدیریت)
+        sent = cc.show(chat_id, text, key="admin_menu", reply_markup=kb, parse_mode="HTML")
+        return sent
 
     except Exception:
         logger.exception("render_trial_settings crashed")
         try:
-            bot.send_message(chat_id, GENERIC_ERROR_MESSAGE)
+            cc.show(chat_id, GENERIC_ERROR_MESSAGE, key="admin_menu")
         except Exception:
             pass
 
@@ -513,11 +541,13 @@ def render_trial_settings(chat_id, message_id=None):
 @bot.message_handler(func=lambda m: m.text == "🎁 مدیریت تست رایگان" and is_admin(m.from_user.id))
 def admin_trial_settings(message):
     try:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
         render_trial_settings(message.chat.id)
     except Exception:
         logger.exception("admin_trial_settings handler crashed")
         try:
-            bot.send_message(message.chat.id, GENERIC_ERROR_MESSAGE)
+            cc.show(message.chat.id, GENERIC_ERROR_MESSAGE, key="admin_menu")
         except Exception:
             pass
 
@@ -560,6 +590,12 @@ NUMBER_SETTINGS = {
 }
 
 
+def _number_setting_back_markup():
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="trialset:back"))
+    return m
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("trialset:")
                              and call.data.split(":")[1] in NUMBER_SETTINGS)
 def trial_setting_number_start(call):
@@ -570,10 +606,15 @@ def trial_setting_number_start(call):
 
         key = call.data.split(":")[1]
         _, prompt = NUMBER_SETTINGS[key]
+        chat_id = call.message.chat.id
 
         safe_answer_callback(call)
-        msg = bot.send_message(call.message.chat.id, prompt)
-        bot.register_next_step_handler(msg, trial_setting_number_save, key)
+        # پنل تنظیمات جای همون یه پیام، سوال رو نشون می‌ده (نه یه پیام جدا)
+        bot.edit_message_text(
+            prompt, chat_id, call.message.message_id,
+            reply_markup=_number_setting_back_markup()
+        )
+        bot.register_next_step_handler_by_chat_id(chat_id, trial_setting_number_save, key)
 
     except Exception:
         logger.exception("trial_setting_number_start handler crashed")
@@ -584,8 +625,26 @@ def trial_setting_number_start(call):
 
 
 def trial_setting_number_save(message, key):
+    chat_id = message.chat.id
     try:
+        cc.drop(message)  # عددی که ادمین تایپ کرده پاک بشه
+
+        # آیدیِ پنلِ تنظیمات که این ورودی برای اونه (اگه به هر دلیلی گم شده
+        # بود، یه پیام تازه می‌سازیم که ادامه‌ی کار خراب نشه)
+        panel_msg_id = cc.get_screen(chat_id, "admin_menu")
+
         text = (message.text or "").strip().replace(",", ".")
+
+        def _reask(err_text):
+            m = _number_setting_back_markup()
+            if panel_msg_id:
+                try:
+                    bot.edit_message_text(err_text, chat_id, panel_msg_id, reply_markup=m)
+                except Exception:
+                    cc.show(chat_id, err_text, key="admin_menu", reply_markup=m)
+            else:
+                cc.show(chat_id, err_text, key="admin_menu", reply_markup=m)
+            bot.register_next_step_handler_by_chat_id(chat_id, trial_setting_number_save, key)
 
         if key == "volume":
             # حجم می‌تواند اعشاری هم باشد (مثلاً 0.5 گیگ)
@@ -595,11 +654,7 @@ def trial_setting_number_save(message, key):
                 value = -1
 
             if value <= 0:
-                msg = bot.send_message(
-                    message.chat.id,
-                    "❌ لطفاً یک عدد بزرگ‌تر از صفر ارسال کن (اعشار هم مجاز است، مثال: 0.5):"
-                )
-                bot.register_next_step_handler(msg, trial_setting_number_save, key)
+                _reask("❌ لطفاً یک عدد بزرگ‌تر از صفر ارسال کن (اعشار هم مجاز است، مثال: 0.5):")
                 return
 
             # اگر عدد صحیح بود بدون اعشار ذخیره شود (5 نه 5.0)
@@ -608,26 +663,24 @@ def trial_setting_number_save(message, key):
         elif key == "daily_limit":
             # سقف روزانه: عدد ۰ یعنی «بدون محدودیت» و مجاز است
             if not text.isdigit():
-                msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد صحیح (۰ یا بیشتر) ارسال کن:")
-                bot.register_next_step_handler(msg, trial_setting_number_save, key)
+                _reask("❌ لطفاً فقط یک عدد صحیح (۰ یا بیشتر) ارسال کن:")
                 return
 
         else:
             if not text.isdigit() or int(text) <= 0:
-                msg = bot.send_message(message.chat.id, "❌ لطفاً فقط یک عدد بزرگ‌تر از صفر ارسال کن:")
-                bot.register_next_step_handler(msg, trial_setting_number_save, key)
+                _reask("❌ لطفاً فقط یک عدد بزرگ‌تر از صفر ارسال کن:")
                 return
 
         setting_key, _ = NUMBER_SETTINGS[key]
         set_setting(setting_key, text)
 
-        bot.send_message(message.chat.id, "✅ ذخیره شد.")
-        render_trial_settings(message.chat.id)
+        # برمی‌گردیم به همون پیامِ پنل و صفحه‌ی تنظیمات رو رفرش می‌کنیم
+        render_trial_settings(chat_id, panel_msg_id)
 
     except Exception:
         logger.exception("trial_setting_number_save handler crashed")
         try:
-            bot.send_message(message.chat.id, GENERIC_ERROR_MESSAGE)
+            cc.show(chat_id, GENERIC_ERROR_MESSAGE, key="admin_menu")
         except Exception:
             pass
 
@@ -706,6 +759,7 @@ def trial_setting_back(call):
             safe_answer_callback(call)
             return
 
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
         safe_answer_callback(call)
         render_trial_settings(call.message.chat.id, call.message.message_id)
 
