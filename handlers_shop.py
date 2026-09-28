@@ -380,6 +380,7 @@ def _no_service_markup():
     if "🎁 تست رایگان" in MENU_SHORTCUTS:
         idx = MENU_SHORTCUTS.index("🎁 تست رایگان")
         kb.add(types.InlineKeyboardButton("🎁 دریافت تست رایگان", callback_data=f"go_menu:{idx}"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
     return kb
 
 
