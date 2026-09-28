@@ -144,13 +144,15 @@ def go_menu(call):
 
     bot.clear_step_handler_by_chat_id(chat_id)
 
+    # صفحه‌ای که این دکمه روشه (چه پیام همگانی، چه مثلاً صفحه‌ی «سرویسی ندارید»)
+    # همین الان و قطعی پاک میشه، نه با تأخیر، تا ردی ازش تو ردیابی چت نمونه.
+    cc.drop_screen(chat_id)
+    cc.safe_delete(chat_id, call.message.message_id)
+
     fake = copy.copy(call.message)
     fake.from_user = call.from_user
     fake.text = label
     bot.process_new_messages([fake])
-
-    # پیام همگانی پاک میشه (صفحه‌ی قبلی رو خود بخش جدید موقع نمایش پاک می‌کنه)
-    cc.delete_later(chat_id, call.message.message_id, delay=1.0)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_join")
