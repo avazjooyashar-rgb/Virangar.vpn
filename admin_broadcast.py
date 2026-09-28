@@ -28,6 +28,7 @@ from config import bot
 from database import db_execute, get_setting, set_setting
 from decorators import admin_only, admin_only_call
 from keyboards import admin_keyboard
+from force_join import MENU_SHORTCUTS
 
 
 # state هر ادمین: chat_id -> dict
@@ -647,6 +648,7 @@ def _bc_show_type_menu(chat_id, message_id):
     m = types.InlineKeyboardMarkup()
     m.row(types.InlineKeyboardButton("🔗 لینک", callback_data="bc_type_url"))
     m.row(types.InlineKeyboardButton("🚀 استارت ربات", callback_data="bc_type_start"))
+    m.row(types.InlineKeyboardButton("🧭 میان‌بر به بخش ربات (مثلاً خرید VPN)", callback_data="bc_type_menu"))
     m.row(types.InlineKeyboardButton("✅ چک عضویت کانال", callback_data="bc_type_check"))
     m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_back_to_label"))
     try:
@@ -762,6 +764,49 @@ def _bc_start_received(message):
     _bc_render_manage(chat_id)
 
 
+@bot.callback_query_handler(func=lambda c: c.data == "bc_type_menu")
+@admin_only_call
+def cb_bc_type_menu(call):
+    if not _check_state(call, "bc"):
+        return
+    m = types.InlineKeyboardMarkup()
+    for idx, label in enumerate(MENU_SHORTCUTS):
+        m.row(types.InlineKeyboardButton(label, callback_data=f"bc_menu_pick:{idx}"))
+    m.row(types.InlineKeyboardButton("🔙 بازگشت", callback_data="bc_back_to_type"))
+    try:
+        bot.edit_message_text(
+            "🧭 کاربر با زدن این دکمه مستقیم وارد کدوم بخش بشه؟",
+            call.message.chat.id, call.message.message_id, reply_markup=m
+        )
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bc_menu_pick:"))
+@admin_only_call
+def cb_bc_menu_pick(call):
+    if not _check_state(call, "bc"):
+        return
+    chat_id = call.message.chat.id
+    st = _state[chat_id]
+
+    try:
+        idx = int(call.data.split(":", 1)[1])
+        MENU_SHORTCUTS[idx]
+    except Exception:
+        bot.answer_callback_query(call.id, "⛔ گزینه نامعتبر", show_alert=True)
+        return
+
+    st["rows"][-1].append({
+        "text": st.pop("_tmp_label", "دکمه"),
+        "type": "menu",
+        "value": idx
+    })
+    _bc_render_manage(chat_id)
+    bot.answer_callback_query(call.id, "✅ اضافه شد")
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "bc_type_check")
 @admin_only_call
 def cb_bc_type_check(call):
@@ -800,6 +845,8 @@ def _bc_build_user_markup(rows):
                 else:
                     # بدون پارامتر: همون /start رو مستقیم تو همون چت اجرا می‌کنه
                     btns.append(types.InlineKeyboardButton(b["text"], callback_data="go_start"))
+            elif b["type"] == "menu":
+                btns.append(types.InlineKeyboardButton(b["text"], callback_data=f"go_menu:{b['value']}"))
             elif b["type"] == "check_join":
                 btns.append(types.InlineKeyboardButton(b["text"], callback_data="check_join"))
         if btns:
