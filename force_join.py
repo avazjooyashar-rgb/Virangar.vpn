@@ -149,8 +149,7 @@ def go_menu(call):
     fake.text = label
     bot.process_new_messages([fake])
 
-    # پیام همگانی و صفحه‌ی قبلی پاک میشن، فقط بخش جدید می‌مونه
-    cc.drop_screen(chat_id)
+    # پیام همگانی پاک میشه (صفحه‌ی قبلی رو خود بخش جدید موقع نمایش پاک می‌کنه)
     cc.delete_later(chat_id, call.message.message_id, delay=1.0)
 
 
