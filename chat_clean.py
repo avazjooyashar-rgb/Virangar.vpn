@@ -36,6 +36,12 @@ def delete_later(chat_id, message_id, delay=1.0):
     t.start()
 
 
+def is_screen(chat_id, message_id, key="main"):
+    """آیا این پیام همون «صفحه‌ی» فعلیِ ثبت‌شده‌ست؟ (یعنی پیام منو/مرحله‌ست، نه مثلاً کانفیگ)"""
+    with _lock:
+        return _last.get((chat_id, key)) == message_id
+
+
 def drop(message):
     """پیام ورودی خود کاربر (مثل زدن دکمه‌ی منو) رو پاک می‌کنه."""
     safe_delete(message.chat.id, message.message_id)
