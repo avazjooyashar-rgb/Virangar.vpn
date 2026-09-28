@@ -3,13 +3,23 @@
 # راهنما و حساب کاربری
 # ============================================================
 
+from telebot import types
+
 from config import bot
 from models import get_user
+import chat_clean as cc
+
+
+def _home_markup():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    return kb
 
 
 @bot.message_handler(func=lambda m: m.text == "📚 راهنما")
 def guide(message):
-    bot.send_message(
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    cc.show(
         message.chat.id,
         "📚 <b>راهنمای VirangarVPN</b>\n\n"
         "🛒 خرید VPN\n"
@@ -21,21 +31,26 @@ def guide(message):
         "🤝 نمایندگی\n"
         "مدیریت پنل و کاربران نمایندگی.\n\n"
         "🆘 پشتیبانی\n"
-        "ایجاد و پیگیری تیکت."
+        "ایجاد و پیگیری تیکت.",
+        reply_markup=_home_markup()
     )
 
 
 @bot.message_handler(func=lambda m: m.text == "⚙️ حساب کاربری")
 def account(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     user = get_user(message.from_user.id)
 
     username = f"@{user['username']}" if user and user["username"] else "بدون یوزرنیم"
 
-    bot.send_message(
+    cc.show(
         message.chat.id,
-        "⚙️ <b>حساب کاربری</b>\n\n"
-        f"🆔 Telegram ID: <code>{message.from_user.id}</code>\n"
-        f"👤 Username: {username}\n"
-        f"💰 موجودی: {user['balance']:,} تومان\n"
-        f"📅 عضویت: {user['created_at']}"
+        "🪪 <b>حساب کاربری شما</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"🆔 آیدی عددی: <code>{message.from_user.id}</code>\n"
+        f"👤 نام کاربری: {username}\n"
+        f"💰 موجودی کیف پول: <b>{user['balance']:,}</b> تومان\n"
+        f"📅 تاریخ عضویت: {user['created_at']}\n\n"
+        "✨ برای شارژ کیف پول از منوی اصلی وارد بخش «💰 کیف پول» شو.",
+        reply_markup=_home_markup()
     )
