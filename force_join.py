@@ -3,12 +3,27 @@
 # منطق عضویت اجباری در کانال + دستور /start
 # ============================================================
 
+import copy
 import logging
 
 from config import bot, BOT_NAME
 from database import get_setting
 from models import ensure_user, is_superadmin
 from keyboards import user_keyboard, force_join_markup
+
+
+# بخش‌هایی که ادمین می‌تونه از پیام همگانی «میان‌بر» بهشون بسازه.
+# متن‌ها باید دقیقاً مثل دکمه‌های user_keyboard باشن.
+MENU_SHORTCUTS = [
+    "🛒 خرید VPN",
+    "🛡 سرویس‌های من",
+    "🎁 تست رایگان",
+    "💰 کیف پول",
+    "📜 تراکنش‌های من",
+    "🤝 پنل نمایندگی",
+    "🆘 پشتیبانی",
+    "📚 راهنما",
+]
 
 
 DEFAULT_FORCE_JOIN_MESSAGE = (
@@ -97,6 +112,41 @@ def go_start(call):
     bot.answer_callback_query(call.id)
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
     _send_start(call.message.chat.id, call.from_user)
+
+
+# میان‌بر به بخش‌های ربات (مثلاً خرید VPN) از داخل پیام همگانی:
+# مثل این میشه که کاربر خودش دکمه‌ی همون بخش رو از منوی پایین زده باشه.
+@bot.callback_query_handler(func=lambda call: call.data.startswith("go_menu:"))
+def go_menu(call):
+    bot.answer_callback_query(call.id)
+
+    try:
+        label = MENU_SHORTCUTS[int(call.data.split(":", 1)[1])]
+    except Exception:
+        return
+
+    chat_id = call.message.chat.id
+    user = ensure_user(call.from_user)
+
+    if user["is_blocked"]:
+        bot.send_message(chat_id, "⛔ حساب شما مسدود شده است.")
+        return
+
+    if not force_join_ok(call.from_user.id):
+        bot.send_message(
+            chat_id,
+            _force_join_message_text(),
+            reply_markup=force_join_markup(),
+            parse_mode="HTML"
+        )
+        return
+
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    fake = copy.copy(call.message)
+    fake.from_user = call.from_user
+    fake.text = label
+    bot.process_new_messages([fake])
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_join")
