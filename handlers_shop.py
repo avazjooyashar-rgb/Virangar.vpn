@@ -12,6 +12,7 @@ from models import internal_user_id, get_user, is_superadmin
 from force_join import force_join_ok
 from keyboards import force_join_markup, user_keyboard
 from pasarguard_api import pasarguard_get_user_usage, pasarguard_delete_service
+import chat_clean as cc
 
 USERNAME_PREFIX = "virangarvpn."
 
@@ -47,8 +48,9 @@ def panels_keyboard():
 
 @bot.message_handler(func=lambda m: m.text == "🛒 خرید VPN")
 def buy_vpn(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     if not force_join_ok(message.from_user.id):
-        bot.send_message(
+        cc.show(
             message.chat.id,
             "🔒 ابتدا عضو کانال شوید.",
             reply_markup=force_join_markup()
@@ -60,9 +62,9 @@ def buy_vpn(message):
 def show_panels(chat_id):
     kb, panels = panels_keyboard()
     if not panels:
-        bot.send_message(chat_id, "❌ در حال حاضر هیچ پنل فعالی با پلن موجود نیست.")
+        cc.show(chat_id, "❌ در حال حاضر هیچ پنل فعالی با پلن موجود نیست.")
         return
-    bot.send_message(
+    cc.show(
         chat_id,
         "🖥 <b>انتخاب پنل</b>\n\n"
         "لطفاً یکی از پنل‌های زیر را انتخاب کنید:",
@@ -74,6 +76,7 @@ def show_panels(chat_id):
 @bot.callback_query_handler(func=lambda call: call.data == "buy_back_home")
 def buy_back_home(call):
     bot.answer_callback_query(call.id)
+    cc.safe_delete(call.message.chat.id, call.message.message_id)
     show_panels(call.message.chat.id)
 
 
@@ -103,6 +106,9 @@ def plans_keyboard(panel_id):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buypanel:"))
 def select_panel(call):
+    # اگه از مرحله‌ی «گرفتن نام» برگشته، دیگه منتظر متن نمی‌مونیم
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+
     panel_id = int(call.data.split(":")[1])
     panel = db_execute(
         "SELECT * FROM panels WHERE id=? AND active=1",
@@ -169,7 +175,8 @@ def select_plan(call):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"buypanel:{panel_id}"))
 
     bot.answer_callback_query(call.id)
-    sent = bot.send_message(
+    cc.safe_delete(call.message.chat.id, call.message.message_id)  # لیست پلن‌ها پاک بشه
+    sent = cc.show(
         call.message.chat.id,
         text,
         reply_markup=kb,
@@ -179,14 +186,18 @@ def select_plan(call):
 
 
 def receive_username(message, plan_id):
+    cc.drop(message)                       # نامی که کاربر تایپ کرده پاک بشه
+    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
+
     raw = (message.text or "").strip().lower()
 
     if not re.fullmatch(r"[a-z0-9_]{2,20}", raw):
-        sent = bot.send_message(
+        sent = cc.show(
             message.chat.id,
             "❌ نام نامعتبر است.\n\n"
             "فقط از حروف انگلیسی کوچک، عدد و _ استفاده کنید (۲ تا ۲۰ کاراکتر).\n\n"
-            "دوباره ارسال کنید:"
+            "دوباره ارسال کنید:",
+            key="err"
         )
         bot.register_next_step_handler(sent, receive_username, plan_id)
         return
@@ -197,7 +208,7 @@ def receive_username(message, plan_id):
         fetchone=True
     )
     if not plan:
-        bot.send_message(message.chat.id, "❌ این پلن دیگر موجود نیست.")
+        cc.show(message.chat.id, "❌ این پلن دیگر موجود نیست.")
         return
 
     username = f"{USERNAME_PREFIX}{raw}"
@@ -214,10 +225,11 @@ def receive_username(message, plan_id):
     )
 
     if existing_service or existing_pending_payment:
-        sent = bot.send_message(
+        sent = cc.show(
             message.chat.id,
             "❌ این نام قبلاً استفاده شده یا در انتظار تأیید یک پرداخت دیگر است.\n\n"
-            "لطفاً یک نام دیگر انتخاب کنید:"
+            "لطفاً یک نام دیگر انتخاب کنید:",
+            key="err"
         )
         bot.register_next_step_handler(sent, receive_username, plan_id)
         return
@@ -268,7 +280,7 @@ def show_payment_methods(chat_id, telegram_id, plan, username):
             callback_data=f"buypanel:{plan['panel_id']}"
         )
     )
-    bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 
 # ============================================================
@@ -364,10 +376,11 @@ def _get_panel_for_service(service):
 
 @bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
 def my_services(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     services = _get_user_services(message.from_user.id)
 
     if not services:
-        bot.send_message(
+        cc.show(
             message.chat.id,
             "📭 شما هنوز سرویسی ندارید.\n\n"
             "برای خرید یا دریافت تست رایگان از منوی اصلی اقدام کنید."
@@ -376,7 +389,7 @@ def my_services(message):
 
     kb = _services_list_keyboard(services)
 
-    bot.send_message(
+    cc.show(
         message.chat.id,
         "🛡 <b>سرویس‌های من</b>\n\n"
         "یکی از سرویس‌های زیر را انتخاب کن:",
@@ -418,16 +431,21 @@ def services_back(call):
 @bot.callback_query_handler(func=lambda call: call.data == "go_home")
 def go_home(call):
     bot.answer_callback_query(call.id)
-    try:
-        bot.edit_message_reply_markup(
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=None
-        )
-    except Exception:
-        pass
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
 
-    bot.send_message(
+    # اگه این پیام یه «صفحه‌ی منو/مرحله» بود، پایین با نمایش منوی اصلی پاک میشه.
+    # اگه پیام دیگه‌ای بود (مثلاً کانفیگ یا رسید)، پاک نمیشه و فقط دکمه‌هاش برداشته میشه.
+    if not cc.is_screen(call.message.chat.id, call.message.message_id):
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
+
+    cc.show(
         call.message.chat.id,
         "🏠 بازگشت به منوی اصلی",
         reply_markup=user_keyboard(
@@ -567,10 +585,13 @@ def service_config(call):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"service:{service_id}"))
 
     bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
+    # به‌جای ارسال پیام جدید، همون پیام جزئیات به صفحه‌ی کانفیگ تبدیل میشه
+    # (با «بازگشت» دوباره به جزئیات برمی‌گرده) تا پیام تکراری نمونه.
+    bot.edit_message_text(
         f"🔗 <b>لینک اشتراک سرویس</b>\n\n"
         f"<code>{config}</code>",
+        call.message.chat.id,
+        call.message.message_id,
         reply_markup=kb,
         parse_mode="HTML"
     )
