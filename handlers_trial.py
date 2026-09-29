@@ -240,21 +240,22 @@ def free_trial(message):
         chat_id = message.chat.id
         user = get_user(message.from_user.id)
 
-        home_kb = user_keyboard(is_super_admin=is_superadmin(message.from_user.id))
-
         if get_setting("trial_enabled", "1") != "1":
-            cc.show(chat_id, "❌ تست رایگان غیرفعال است.", reply_markup=home_kb)
+            cc.show(chat_id, "❌ تست رایگان غیرفعال است.", reply_markup=_dead_end_markup())
+            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         if daily_limit_reached():
-            cc.show(chat_id, DAILY_LIMIT_MESSAGE, reply_markup=home_kb)
+            cc.show(chat_id, DAILY_LIMIT_MESSAGE, reply_markup=_dead_end_markup())
+            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         limit = int(get_setting("trial_limit", "1"))
         used = count_user_trials(user["id"])
 
         if used >= limit:
-            cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", reply_markup=home_kb)
+            cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", reply_markup=_dead_end_markup())
+            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         sent = cc.show(
