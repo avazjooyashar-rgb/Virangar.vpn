@@ -74,11 +74,25 @@ def track(chat_id, message_id, key="main"):
 
 
 def show(chat_id, text, key="main", **kwargs):
-    """پیام جدید می‌فرسته و صفحه‌ی قبلیِ همین کلید رو پاک می‌کنه."""
-    drop_screen(chat_id, key)
+    """
+    پیام جدید می‌فرسته و صفحه‌ی قبلیِ همین کلید رو پاک می‌کنه.
+    برای سرعت بیشتر: اول پیام جدید فرستاده میشه (کاربر فوری جواب رو
+    می‌بینه)، بعد پیام قبلی تو پس‌زمینه (بدون معطل کردن کاربر) پاک میشه.
+    """
+    with _lock:
+        old = _last.get((chat_id, key))
+
     for linked in _LINKED.get(key, []):
         drop_screen(chat_id, linked)
+
     sent = bot.send_message(chat_id, text, **kwargs)
+
     with _lock:
         _last[(chat_id, key)] = sent.message_id
+
+    if old and old != sent.message_id:
+        t = threading.Timer(0, safe_delete, args=(chat_id, old))
+        t.daemon = True
+        t.start()
+
     return sent
