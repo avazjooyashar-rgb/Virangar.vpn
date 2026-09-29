@@ -7,22 +7,40 @@ from telebot import types
 
 from config import bot
 from database import db_execute
+import chat_clean as cc
 
 
-@bot.message_handler(func=lambda m: m.text == "🤝 پنل نمایندگی")
-def reseller_menu(message):
+def _reseller_menu_markup():
     kb = types.InlineKeyboardMarkup()
-
     kb.add(types.InlineKeyboardButton("🛒 خرید پنل نمایندگی", callback_data="reseller_buy"))
     kb.add(types.InlineKeyboardButton("🖥 پنل‌های من", callback_data="reseller_panels"))
     kb.add(types.InlineKeyboardButton("👥 کاربران من", callback_data="reseller_users"))
     kb.add(types.InlineKeyboardButton("📈 آمار فروش", callback_data="reseller_stats"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    return kb
 
-    bot.send_message(
+
+@bot.message_handler(func=lambda m: m.text == "🤝 پنل نمایندگی")
+def reseller_menu(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    cc.show(
         message.chat.id,
         "🤝 <b>پنل نمایندگی</b>\n\n"
         "از این قسمت می‌توانید نمایندگی خود را مدیریت کنید.",
-        reply_markup=kb
+        reply_markup=_reseller_menu_markup()
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "reseller_back")
+def reseller_back(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🤝 <b>پنل نمایندگی</b>\n\n"
+        "از این قسمت می‌توانید نمایندگی خود را مدیریت کنید.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=_reseller_menu_markup(),
+        parse_mode="HTML"
     )
 
 
@@ -34,11 +52,19 @@ def reseller_buy(call):
     ORDER BY id
     """, fetchall=True)
 
-    if not plans:
-        bot.send_message(call.message.chat.id, "📭 پلن نمایندگی موجود نیست.")
-        return
-
     kb = types.InlineKeyboardMarkup()
+
+    bot.answer_callback_query(call.id)
+
+    if not plans:
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="reseller_back"))
+        bot.edit_message_text(
+            "📭 پلن نمایندگی موجود نیست.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb
+        )
+        return
 
     for plan in plans:
         kb.add(
@@ -47,8 +73,14 @@ def reseller_buy(call):
                 callback_data=f"rplan:{plan['id']}"
             )
         )
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="reseller_back"))
 
-    bot.send_message(call.message.chat.id, "🤝 پلن نمایندگی را انتخاب کنید:", reply_markup=kb)
+    bot.edit_message_text(
+        "🤝 پلن نمایندگی را انتخاب کنید:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb
+    )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rplan:"))
@@ -62,13 +94,21 @@ def reseller_plan(call):
     )
 
     if not plan:
+        bot.answer_callback_query(call.id, "این پلن دیگر موجود نیست.", show_alert=True)
         return
 
-    bot.send_message(
-        call.message.chat.id,
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="reseller_buy"))
+
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
         f"🤝 <b>{plan['name']}</b>\n\n"
         f"💰 قیمت: {plan['price']:,} تومان\n"
         f"👥 ظرفیت: {plan['capacity']}\n"
         f"⏳ مدت: {plan['duration']} روز\n\n"
-        "خرید پنل نمایندگی در مرحله پرداخت انجام می‌شود."
+        "خرید پنل نمایندگی در مرحله پرداخت انجام می‌شود.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="HTML"
     )
