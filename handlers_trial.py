@@ -39,22 +39,6 @@ def _dead_end_markup():
     return kb
 
 
-def _refresh_home_keyboard(chat_id, from_user_id):
-    """
-    کیبورد پایینِ همیشگی (منوی اصلی) رو، دقیقاً همون لحظه، دوباره به
-    چت وصل می‌کنه تا اگه از دید کاربر جمع/گم شده بود، برگرده و بدون
-    نیاز به زدن دکمه‌ی خاصی، مستقیم از همون کلیدهای پایین استفاده کنه.
-    """
-    try:
-        bot.send_message(
-            chat_id,
-            "👇 از دکمه‌های پایین ادامه بده:",
-            reply_markup=user_keyboard(is_super_admin=is_superadmin(from_user_id))
-        )
-    except Exception:
-        logger.exception("_refresh_home_keyboard failed")
-
-
 # ============================================================
 # HELPERS
 # ============================================================
@@ -242,12 +226,10 @@ def free_trial(message):
 
         if get_setting("trial_enabled", "1") != "1":
             cc.show(chat_id, "❌ تست رایگان غیرفعال است.", reply_markup=_dead_end_markup())
-            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         if daily_limit_reached():
             cc.show(chat_id, DAILY_LIMIT_MESSAGE, reply_markup=_dead_end_markup())
-            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         limit = int(get_setting("trial_limit", "1"))
@@ -255,7 +237,6 @@ def free_trial(message):
 
         if used >= limit:
             cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", reply_markup=_dead_end_markup())
-            _refresh_home_keyboard(chat_id, message.from_user.id)
             return
 
         sent = cc.show(
@@ -364,7 +345,6 @@ def trial_confirm(call):
         if daily_limit_reached():
             safe_answer_callback(call, "❌ سهمیه‌ی امروز تکمیل شده.", show_alert=True)
             safe_edit_message(DAILY_LIMIT_MESSAGE, chat_id, call.message.message_id, reply_markup=_dead_end_markup())
-            _refresh_home_keyboard(chat_id, call.from_user.id)
             return
 
         limit = int(get_setting("trial_limit", "1"))
@@ -376,7 +356,6 @@ def trial_confirm(call):
                 "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.",
                 chat_id, call.message.message_id, reply_markup=_dead_end_markup()
             )
-            _refresh_home_keyboard(chat_id, call.from_user.id)
             return
 
         if username_taken(final_username):
