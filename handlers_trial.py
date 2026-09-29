@@ -10,9 +10,11 @@ from datetime import date
 
 from telebot import types
 
+from keyboards import user_keyboard
+
 from config import bot
 from database import db_execute, get_setting, set_setting, now
-from models import get_user, is_admin
+from models import get_user, is_admin, is_superadmin
 from pasarguard_api import pasarguard_create_service
 from services import create_local_service
 import chat_clean as cc
@@ -24,6 +26,33 @@ USERNAME_PREFIX = "virangarvpn"          # نمایش به کاربر: virangarv
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,20}$")
 
 GENERIC_ERROR_MESSAGE = "❌ خطایی رخ داد، لطفاً دوباره تلاش کن."
+
+
+def _dead_end_markup():
+    """
+    فقط برای موقعی که داریم پیامِ inline (دکمه‌دار) رو ادیت می‌کنیم
+    (که نمیشه کیبورد پایین رو بهش وصل کرد) استفاده میشه.
+    """
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🛒 خرید سرویس", callback_data="buy_back_home"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    return kb
+
+
+def _refresh_home_keyboard(chat_id, from_user_id):
+    """
+    کیبورد پایینِ همیشگی (منوی اصلی) رو، دقیقاً همون لحظه، دوباره به
+    چت وصل می‌کنه تا اگه از دید کاربر جمع/گم شده بود، برگرده و بدون
+    نیاز به زدن دکمه‌ی خاصی، مستقیم از همون کلیدهای پایین استفاده کنه.
+    """
+    try:
+        bot.send_message(
+            chat_id,
+            "👇 از دکمه‌های پایین ادامه بده:",
+            reply_markup=user_keyboard(is_super_admin=is_superadmin(from_user_id))
+        )
+    except Exception:
+        logger.exception("_refresh_home_keyboard failed")
 
 
 # ============================================================
@@ -211,19 +240,21 @@ def free_trial(message):
         chat_id = message.chat.id
         user = get_user(message.from_user.id)
 
+        home_kb = user_keyboard(is_super_admin=is_superadmin(message.from_user.id))
+
         if get_setting("trial_enabled", "1") != "1":
-            cc.show(chat_id, "❌ تست رایگان غیرفعال است.")
+            cc.show(chat_id, "❌ تست رایگان غیرفعال است.", reply_markup=home_kb)
             return
 
         if daily_limit_reached():
-            cc.show(chat_id, DAILY_LIMIT_MESSAGE)
+            cc.show(chat_id, DAILY_LIMIT_MESSAGE, reply_markup=home_kb)
             return
 
         limit = int(get_setting("trial_limit", "1"))
         used = count_user_trials(user["id"])
 
         if used >= limit:
-            cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.")
+            cc.show(chat_id, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", reply_markup=home_kb)
             return
 
         sent = cc.show(
@@ -331,7 +362,8 @@ def trial_confirm(call):
 
         if daily_limit_reached():
             safe_answer_callback(call, "❌ سهمیه‌ی امروز تکمیل شده.", show_alert=True)
-            safe_edit_message(DAILY_LIMIT_MESSAGE, chat_id, call.message.message_id)
+            safe_edit_message(DAILY_LIMIT_MESSAGE, chat_id, call.message.message_id, reply_markup=_dead_end_markup())
+            _refresh_home_keyboard(chat_id, call.from_user.id)
             return
 
         limit = int(get_setting("trial_limit", "1"))
@@ -339,6 +371,11 @@ def trial_confirm(call):
 
         if used >= limit:
             safe_answer_callback(call, "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.", show_alert=True)
+            safe_edit_message(
+                "❌ شما قبلاً از تست رایگان استفاده کرده‌اید.",
+                chat_id, call.message.message_id, reply_markup=_dead_end_markup()
+            )
+            _refresh_home_keyboard(chat_id, call.from_user.id)
             return
 
         if username_taken(final_username):
