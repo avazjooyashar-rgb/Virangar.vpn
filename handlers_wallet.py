@@ -10,10 +10,12 @@ from database import db_execute, get_setting, now
 from models import get_user, internal_user_id
 from handlers_payment import notify_admin_payment
 from keyboards import user_keyboard
+import chat_clean as cc
 
 
 @bot.message_handler(func=lambda m: m.text == "💰 کیف پول")
 def wallet(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     render_wallet_menu(message.chat.id, message.from_user.id)
 
 
@@ -34,65 +36,114 @@ def render_wallet_menu(chat_id, from_user_id, message_id=None):
             return
         except Exception:
             pass
-    bot.send_message(chat_id, text, reply_markup=kb)
+    cc.show(chat_id, text, reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "wallet:menu")
 def wallet_menu_cb(call):
     bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
     render_wallet_menu(call.message.chat.id, call.from_user.id, call.message.message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "wallet:back_main")
 def wallet_back_main(call):
     bot.answer_callback_query(call.id)
-    try:
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    except Exception:
-        pass
-    bot.send_message(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=user_keyboard())
+    cc.show(call.message.chat.id, "🏠 بازگشت به منوی اصلی", reply_markup=user_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "wallet_topup")
 def wallet_topup(call):
     bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 انصراف و بازگشت", callback_data="wallet:menu"))
-    sent = bot.send_message(call.message.chat.id, "💳 مبلغ شارژ را به تومان وارد کن:", reply_markup=kb)
-    bot.register_next_step_handler(sent, wallet_amount)
+
+    try:
+        bot.edit_message_text(
+            "💳 مبلغ شارژ را به تومان وارد کن:",
+            chat_id, call.message.message_id, reply_markup=kb
+        )
+    except Exception:
+        cc.show(chat_id, "💳 مبلغ شارژ را به تومان وارد کن:", reply_markup=kb)
+
+    bot.register_next_step_handler_by_chat_id(chat_id, wallet_amount)
 
 
 def wallet_amount(message):
+    chat_id = message.chat.id
+    cc.drop(message)  # عددی که کاربر تایپ کرده پاک بشه
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 انصراف و بازگشت", callback_data="wallet:menu"))
+    screen_id = cc.get_screen(chat_id)
+
     try:
         amount = int(message.text.replace(",", "").replace(" ", ""))
         if amount <= 0:
             raise ValueError
     except ValueError:
-        bot.send_message(message.chat.id, "❌ مبلغ نامعتبر است.")
+        text = "❌ مبلغ نامعتبر است. دوباره وارد کن:"
+        if screen_id:
+            try:
+                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, text, reply_markup=kb)
+        else:
+            cc.show(chat_id, text, reply_markup=kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, wallet_amount)
         return
 
     card = get_setting("card_number", "")
     holder = get_setting("card_holder", "")
 
     if not card:
-        bot.send_message(message.chat.id, "❌ پرداخت کارت به کارت تنظیم نشده.")
+        text = "❌ پرداخت کارت به کارت تنظیم نشده."
+        if screen_id:
+            try:
+                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, text, reply_markup=kb)
+        else:
+            cc.show(chat_id, text, reply_markup=kb)
         return
 
-    bot.send_message(
-        message.chat.id,
+    text = (
         f"💳 مبلغ <b>{amount:,} تومان</b> را به کارت زیر انتقال بده:\n\n"
         f"<code>{card}</code>\n"
         f"👤 {holder}\n\n"
         "سپس تصویر رسید را ارسال کن."
     )
+    if screen_id:
+        try:
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+        except Exception:
+            cc.show(chat_id, text, reply_markup=kb)
+    else:
+        cc.show(chat_id, text, reply_markup=kb)
 
-    bot.register_next_step_handler(message, wallet_receipt, amount)
+    bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount)
 
 
 def wallet_receipt(message, amount):
+    chat_id = message.chat.id
+    cc.drop(message)  # عکس/پیام کاربر پاک بشه
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 انصراف و بازگشت", callback_data="wallet:menu"))
+    screen_id = cc.get_screen(chat_id)
+
     if not message.photo:
-        bot.send_message(message.chat.id, "❌ فقط تصویر رسید را ارسال کن.")
-        bot.register_next_step_handler(message, wallet_receipt, amount)
+        text = "❌ فقط تصویر رسید را ارسال کن."
+        if screen_id:
+            try:
+                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, text, reply_markup=kb)
+        else:
+            cc.show(chat_id, text, reply_markup=kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount)
         return
 
     user_id = internal_user_id(message.from_user.id)
@@ -117,11 +168,20 @@ def wallet_receipt(message, amount):
 
     notify_admin_payment(payment)
 
-    bot.send_message(
-        message.chat.id,
+    text = (
         "✅ رسید شارژ کیف پول ثبت شد.\n\n"
         "⏳ منتظر تأیید مدیریت باشید."
     )
+    ok_kb = types.InlineKeyboardMarkup()
+    ok_kb.add(types.InlineKeyboardButton("🔙 بازگشت به کیف پول", callback_data="wallet:menu"))
+
+    if screen_id:
+        try:
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=ok_kb)
+            return
+        except Exception:
+            pass
+    cc.show(chat_id, text, reply_markup=ok_kb)
 
 
 def _build_transaction_entries(user_id):
@@ -186,14 +246,18 @@ def wallet_history(call):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به کیف پول", callback_data="wallet:menu"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="wallet:back_main"))
 
-    if not entries:
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "📭 هنوز تراکنشی ثبت نشده.", reply_markup=kb)
-        return
-
     bot.answer_callback_query(call.id)
-    lines = ["📜 <b>تراکنش‌های کیف پول</b>\n"] + [e["text"] for e in entries]
-    bot.send_message(call.message.chat.id, "\n".join(lines), reply_markup=kb)
+
+    if not entries:
+        text = "📭 هنوز تراکنشی ثبت نشده."
+    else:
+        text = "\n".join(["📜 <b>تراکنش‌های کیف پول</b>\n"] + [e["text"] for e in entries])
+
+    # همون پیام منوی کیف پول جای خودش این لیست رو نشون می‌ده
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        cc.show(call.message.chat.id, text, reply_markup=kb)
 
 
 # ============================================================
@@ -202,6 +266,7 @@ def wallet_history(call):
 
 @bot.message_handler(func=lambda m: m.text == "📜 تراکنش‌های من")
 def my_transactions(message):
+    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     user_id = internal_user_id(message.from_user.id)
     entries = _build_transaction_entries(user_id)
 
@@ -209,8 +274,8 @@ def my_transactions(message):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="wallet:back_main"))
 
     if not entries:
-        bot.send_message(message.chat.id, "📭 تراکنشی ندارید.", reply_markup=kb)
+        cc.show(message.chat.id, "📭 تراکنشی ندارید.", reply_markup=kb)
         return
 
-    text = ["📜 <b>تراکنش‌های من</b>\n"] + [e["text"] for e in entries]
-    bot.send_message(message.chat.id, "\n".join(text), reply_markup=kb)
+    text = "\n".join(["📜 <b>تراکنش‌های من</b>\n"] + [e["text"] for e in entries])
+    cc.show(message.chat.id, text, reply_markup=kb)
