@@ -248,21 +248,8 @@ def create_ticket(message):
         key="main"
     )
 
-    if SUPER_ADMIN_ID:
-        akb = types.InlineKeyboardMarkup()
-        akb.row(
-            types.InlineKeyboardButton("✍️ پاسخ", callback_data=f"asup:reply:{ticket['id']}"),
-            types.InlineKeyboardButton("📂 مشاهده", callback_data=f"asup:view:{ticket['id']}"),
-        )
-        # اعلان به سوپرادمین یه چت جداست؛ عمداً به سیستم پاک‌سازیِ چتِ
-        # کاربر ربطی نداره و دست‌نخورده می‌مونه.
-        bot.send_message(
-            SUPER_ADMIN_ID,
-            f"🎫 <b>تیکت جدید #{ticket['id']}</b>\n\n"
-            f"👤 Telegram ID: <code>{message.from_user.id}</code>\n"
-            f"📝 {esc(message.text)}",
-            reply_markup=akb
-        )
+    # طبق درخواست، دیگه برای هر تیکت جدید پیام جدا تو چت سوپرادمین
+    # فرستاده نمی‌شه؛ تیکت‌های جدید فقط از داخل «🎫 مدیریت تیکت‌ها» دیده میشن.
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sup:mine")
@@ -385,19 +372,8 @@ def user_reply_save(message, ticket_id):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به تیکت", callback_data=f"sup:view:{ticket_id}"))
     render(chat_id, "✅ پیامت ارسال شد.", kb, cc.get_screen(chat_id, "main"), key="main")
 
-    if SUPER_ADMIN_ID:
-        akb = types.InlineKeyboardMarkup()
-        akb.row(
-            types.InlineKeyboardButton("✍️ پاسخ", callback_data=f"asup:reply:{ticket_id}"),
-            types.InlineKeyboardButton("📂 مشاهده", callback_data=f"asup:view:{ticket_id}"),
-        )
-        bot.send_message(
-            SUPER_ADMIN_ID,
-            f"💬 <b>پیام جدید در تیکت #{ticket_id}</b>\n\n"
-            f"👤 Telegram ID: <code>{message.from_user.id}</code>\n"
-            f"📝 {esc(message.text)}",
-            reply_markup=akb
-        )
+    # همینطور برای پیام جدید داخل یه تیکت باز: دیگه پیام جدا به
+    # سوپرادمین فرستاده نمی‌شه، فقط تو پنل مدیریت تیکت‌ها دیده میشه.
 
 
 # ============================================================
