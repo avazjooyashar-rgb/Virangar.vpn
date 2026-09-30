@@ -67,11 +67,11 @@ def wallet_topup(call):
 
     try:
         bot.edit_message_text(
-            "💳 مبلغ شارژ را به تومان وارد کن:",
+            "💳 با استفاده از کیبورد گوشیت، مبلغ شارژ رو به تومان تایپ کن و بفرست 👇",
             chat_id, call.message.message_id, reply_markup=kb
         )
     except Exception:
-        cc.show(chat_id, "💳 مبلغ شارژ را به تومان وارد کن:", reply_markup=kb)
+        cc.show(chat_id, "💳 با استفاده از کیبورد گوشیت، مبلغ شارژ رو به تومان تایپ کن و بفرست 👇", reply_markup=kb)
 
     bot.register_next_step_handler_by_chat_id(chat_id, wallet_amount)
 
