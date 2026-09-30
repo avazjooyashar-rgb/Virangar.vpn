@@ -15,6 +15,7 @@ import chat_clean as cc
 
 @bot.message_handler(func=lambda m: m.text == "💰 کیف پول")
 def wallet(message):
+    bot.clear_step_handler_by_chat_id(message.chat.id)  # اگه وسط یه مرحله‌ی قبلی (مثلاً شارژ) رها شده بود
     cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
     render_wallet_menu(message.chat.id, message.from_user.id)
 
@@ -28,7 +29,11 @@ def render_wallet_menu(chat_id, from_user_id, message_id=None):
     kb.add(types.InlineKeyboardButton("📜 تاریخچه تراکنش", callback_data="wallet_history"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="wallet:back_main"))
 
-    text = f"💰 <b>کیف پول</b>\n\nموجودی: <b>{balance:,} تومان</b>"
+    text = (
+        f"💰 <b>کیف پول</b>\n\n"
+        f"موجودی: <b>{balance:,} تومان</b>\n\n"
+        "👇 از دکمه‌های زیر همین پیام استفاده کن:"
+    )
 
     if message_id:
         try:
