@@ -25,6 +25,7 @@ import admin_dashboard          # noqa: F401  (/admin، داشبورد، کار�
 import admin_panels             # noqa: F401  (پنل‌های PasarGuard)
 import admin_plans              # noqa: F401  (پلن‌های VPN)
 import admin_services           # noqa: F401  (سرویس‌ها، نمایندگان)
+import admin_reseller           # noqa: F401  (مدیریت نمایندگان: پلن‌های نمایندگی، استخر هر نماینده)
 import admin_payment_settings   # noqa: F401  (تنظیمات پرداخت، /setcard)
 import admin_broadcast          # noqa: F401  (همگانی، عضویت اجباری)
 import admin_tickets            # noqa: F401  (تیکت‌های ادمین)
@@ -32,12 +33,16 @@ import admin_user_menu          # noqa: F401  (سوییچ مستقیم ادمی�
 import user_admin_menu          # noqa: F401  (سوییچ مستقیم سوپر ادمین به منوی ادمین)
 # import admin_management       # noqa: F401  (مدیران، بکاپ، گزارش، امنیت، تنظیمات) — فایل وجود نداره، موقتاً غیرفعال شد
 
+# ---------------- BACKGROUND WORKERS ----------------
+import reseller_billing         # noqa: F401  (کارگر پس‌زمینه: کم‌کردن قطره‌ای حجم نماینده‌ها)
+
 # ---------------- FALLBACK (باید آخرین import باشد) ----------------
 import fallback                 # noqa: F401
 
 
 if __name__ == "__main__":
     init_db()
+    reseller_billing.start()
 
     print("=" * 50)
     print(f"{BOT_NAME} Bot is running...")
