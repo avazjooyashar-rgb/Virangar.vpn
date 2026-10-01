@@ -45,7 +45,7 @@ def _back_markup(cb, label="🔙 بازگشت"):
 # ENTRY
 # ============================================================
 
-@bot.message_handler(func=lambda m: m.text == "🤝 نمایندگان")
+@bot.message_handler(func=lambda m: m.text == "🤝 مدیریت نمایندگان")
 @admin_only
 def admin_reseller_entry(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
