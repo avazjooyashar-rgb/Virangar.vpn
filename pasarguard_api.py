@@ -80,6 +80,19 @@ def _to_timestamp(value):
     return None
 
 
+def _disabled_status_value():
+    """
+    نام دقیق مقدار «غیرفعال» تو enum نسخه‌های مختلف SDK فرق داره
+    (DISABLED رایج‌ترینه، بعضی نسخه‌ها LIMITED دارن). اینجا چندتا
+    اسم رایج رو امتحان می‌کنیم تا هرکدوم موجود بود همونو برگردونیم.
+    """
+    for name in ("DISABLED", "LIMITED", "DISABLE"):
+        value = getattr(UserStatus, name, None)
+        if value is not None:
+            return value
+    return "disabled"
+
+
 # ============================================================
 # ASYNC CORE
 # ============================================================
@@ -130,6 +143,51 @@ async def _create_service_async(panel, telegram_user, plan, desired_username=Non
                 f"VirangarVPN | tg:{telegram_user['telegram_id']} | "
                 f"plan:{plan.get('name', '---')}"
             ),
+        )
+        user = await api.create_user_in_all_groups(
+            user_create,
+            token=token.access_token,
+        )
+        return {
+            "success": True,
+            "error": "",
+            "username": user.username,
+            "config": getattr(user, "subscription_url", "") or "",
+            "qr": "",
+        }
+
+
+async def _create_unlimited_service_async(panel, note, desired_username=None):
+    """
+    ساخت یه سرویس «نامحدود» رو پنل (بدون سقف حجم، بدون تاریخ انقضا).
+    مخصوص مشتری‌های زیرمجموعه‌ی نماینده: تنها محدودیتِ واقعی‌شون
+    استخر حجم نماینده‌ست که تو ربات، جدا و دوره‌ای چک/کم می‌شه؛
+    خودِ پنل هیچ سقفی رو این کاربر اعمال نمی‌کنه.
+    نکته: data_limit=0 و expire=0 یعنی «نامحدود» — این‌ها عمداً از
+    مسیر Tools.gb()/Tools.days() رد نمی‌شن چون اون‌ها همیشه یه مقدار
+    مثبت واقعی می‌سازن، نه «صفر/نامحدود».
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+
+        username = _sanitize_username(desired_username)
+        if not username:
+            username = Tools.random_username(prefix="reseller")
+
+        user_create = UserCreate(
+            username=username,
+            data_limit=0,
+            expire=0,
+            status=UserStatus.ACTIVE,
+            note=note or "",
         )
         user = await api.create_user_in_all_groups(
             user_create,
@@ -249,6 +307,33 @@ async def _apply_volume_increase_async(panel, username, add_volume_gb):
         }
 
 
+async def _set_status_async(panel, username, enabled):
+    """
+    فعال/غیرفعال کردن کاربر رو پنل، بدون دست‌زدن به حجم/تاریخ انقضا.
+    برای: اتمام استخر نماینده (غیرفعال) یا شارژ دوباره (فعال).
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+
+        new_status = UserStatus.ACTIVE if enabled else _disabled_status_value()
+
+        modify = UserModify(status=new_status)
+        await api.modify_user_by_username(
+            username=username,
+            user=modify,
+            token=token.access_token,
+        )
+        return {"success": True, "error": ""}
+
+
 async def _delete_service_async(panel, username):
     """
     حذف کامل کاربر از روی پنل.
@@ -307,6 +392,13 @@ def pasarguard_create_service(panel, telegram_user, plan, desired_username=None)
     return _run_with_hard_timeout(_create_service_async, panel, telegram_user, plan, desired_username)
 
 
+def pasarguard_create_unlimited_service(panel, note="", desired_username=None):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel):
+        return {"success": False, "error": "اطلاعات اتصال پنل (URL/Username/Password) کامل نیست."}
+    return _run_with_hard_timeout(_create_unlimited_service_async, panel, note, desired_username)
+
+
 def pasarguard_get_user_usage(panel, username):
     panel = dict(panel)
     if not _panel_credentials_ok(panel) or not username:
@@ -326,6 +418,13 @@ def pasarguard_apply_volume_increase(panel, username, add_volume_gb):
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
     return _run_with_hard_timeout(_apply_volume_increase_async, panel, username, add_volume_gb)
+
+
+def pasarguard_set_status(panel, username, enabled):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
+    return _run_with_hard_timeout(_set_status_async, panel, username, enabled)
 
 
 def pasarguard_delete_service(panel, username):
