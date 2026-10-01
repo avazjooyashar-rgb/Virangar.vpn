@@ -243,6 +243,26 @@ def init_db():
         """)
 
         # ====================================================
+        # SERVICES MIGRATION
+        # برای پشتیبانی از سرویس‌های «نامحدودِ» زیرمجموعه‌ی نماینده
+        # (مصرف قطره‌ای از استخر نماینده کم می‌شود، نه از خود سرویس)
+        # ====================================================
+
+        service_columns = {
+            row["name"]
+            for row in cur.execute(
+                "PRAGMA table_info(services)"
+            ).fetchall()
+        }
+
+        if "is_unlimited" not in service_columns:
+
+            cur.execute("""
+            ALTER TABLE services
+            ADD COLUMN is_unlimited INTEGER DEFAULT 0
+            """)
+
+        # ====================================================
         # PAYMENTS
         # ====================================================
 
@@ -288,7 +308,8 @@ def init_db():
             ADD COLUMN custom_username TEXT
             """)
 
-        # نوع پرداخت: purchase (خرید جدید) / renew (تمدید) / increase (افزایش حجم) / wallet (شارژ کیف پول)
+        # نوع پرداخت: purchase (خرید جدید) / renew (تمدید) / increase (افزایش حجم)
+        # / wallet (شارژ کیف پول) / reseller (شارژ استخر نمایندگی)
         if "type" not in payment_columns:
 
             cur.execute("""
@@ -320,6 +341,15 @@ def init_db():
             ADD COLUMN extra_days INTEGER DEFAULT 0
             """)
 
+        # پلن نمایندگی‌ای که این پرداخت (type='reseller') برای شارژ
+        # استخر نماینده مربوط بهشه — جدا از plan_id چون جدول متفاوتیه
+        if "reseller_plan_id" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN reseller_plan_id INTEGER
+            """)
+
         # ====================================================
         # TRANSACTIONS
         # ====================================================
@@ -341,6 +371,10 @@ def init_db():
 
         # ====================================================
         # RESELLER PLANS
+        # پلن‌هایی که ادمین برای خرید «استخر حجم نمایندگی» تعریف
+        # می‌کند: نام + پنل مبدا + حجم (GB) + قیمت. بدون محدودیت
+        # زمانی — duration دیگر استفاده نمی‌شود (برای سازگاری با
+        # نسخه‌های قدیمی حذف نشده، فقط نادیده گرفته می‌شود).
         # ====================================================
 
         cur.execute("""
@@ -360,8 +394,25 @@ def init_db():
         )
         """)
 
+        reseller_plan_columns = {
+            row["name"]
+            for row in cur.execute(
+                "PRAGMA table_info(reseller_plans)"
+            ).fetchall()
+        }
+
+        if "volume_gb" not in reseller_plan_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_plans
+            ADD COLUMN volume_gb INTEGER DEFAULT 0
+            """)
+
         # ====================================================
         # RESELLER PANELS
+        # هر ردیف = «استخر حجمِ» یک نماینده در یک پنل مشخص.
+        # با هر خرید تأییدشده‌ی جدید از همون پنل، balance جمع
+        # می‌شود (نه جایگزین). با مصرف واقعیِ مشتری‌ها کم می‌شود.
         # ====================================================
 
         cur.execute("""
@@ -380,6 +431,56 @@ def init_db():
 
             FOREIGN KEY(reseller_plan_id)
                 REFERENCES reseller_plans(id)
+        )
+        """)
+
+        reseller_panel_columns = {
+            row["name"]
+            for row in cur.execute(
+                "PRAGMA table_info(reseller_panels)"
+            ).fetchall()
+        }
+
+        if "panel_id" not in reseller_panel_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_panels
+            ADD COLUMN panel_id INTEGER
+            """)
+
+        if "total_purchased" not in reseller_panel_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_panels
+            ADD COLUMN total_purchased INTEGER DEFAULT 0
+            """)
+
+        if "updated_at" not in reseller_panel_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_panels
+            ADD COLUMN updated_at TEXT
+            """)
+
+        # ====================================================
+        # RESELLER USAGE LOG
+        # هر بار که مصرف یک مشتریِ نماینده از استخر کم می‌شود،
+        # یک ردیف اینجا ثبت می‌شود (برای آمار و رهگیری/دیباگ).
+        # ====================================================
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reseller_panel_id INTEGER NOT NULL,
+            service_id INTEGER,
+            amount_gb REAL NOT NULL,
+            created_at TEXT,
+
+            FOREIGN KEY(reseller_panel_id)
+                REFERENCES reseller_panels(id),
+
+            FOREIGN KEY(service_id)
+                REFERENCES services(id)
         )
         """)
 
@@ -507,6 +608,9 @@ def init_db():
             "backup_enabled": "1",
             "backup_interval_hours": "24",
             "backup_retention_days": "30",
+
+            # Reseller billing (مصرف قطره‌ای)
+            "reseller_check_interval_minutes": "15",
         }
 
         for key, value in defaults.items():
