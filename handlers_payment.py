@@ -478,6 +478,7 @@ def payment_detail(call):
         "renew": "🔄 تمدید سرویس",
         "increase": "📈 افزایش حجم",
         "wallet": "💰 شارژ کیف پول",
+        "reseller": "🤝 شارژ استخر نمایندگی",
     }
     type_label = type_label_map.get(payment_type, payment_type)
 
@@ -487,6 +488,17 @@ def payment_detail(call):
     elif payment_type == "increase":
         extra_line = f"➕ حجم اضافه‌شونده: {payment['extra_volume']} GB\n"
 
+    reseller_plan = None
+    if payment_type == "reseller":
+        rp_id = payment["reseller_plan_id"] if "reseller_plan_id" in payment.keys() else None
+        if rp_id:
+            reseller_plan = db_execute("SELECT * FROM reseller_plans WHERE id=?", (rp_id,), fetchone=True)
+
+    if reseller_plan:
+        plan_line = f"📦 پلن نمایندگی: {reseller_plan['name']} ({reseller_plan['volume_gb']} GB)\n"
+    else:
+        plan_line = f"📦 پلن: {plan['name'] if plan else '---'}\n"
+
     text = (
         "💳 <b>جزئیات پرداخت</b>\n\n"
         f"🆔 Payment: <code>{payment['id']}</code>\n"
@@ -494,7 +506,7 @@ def payment_detail(call):
         f"👤 کاربر: {username}\n"
         f"🆔 Telegram ID: <code>{user['telegram_id'] if user else '---'}</code>\n"
         f"💰 مبلغ: {payment['amount']:,} تومان\n"
-        f"📦 پلن: {plan['name'] if plan else '---'}\n"
+        f"{plan_line}"
         f"{extra_line}"
         f"🏷 نام سرویس: {custom_username or '---'}\n"
         f"📌 روش: {payment['method']}\n"
@@ -564,6 +576,18 @@ def approve_payment(call):
             return
         db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
         bot.answer_callback_query(call.id, "✅ تأیید و اعمال شد.")
+        payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
+        return
+
+    # شارژ استخر حجم نمایندگی (کارت به کارت، نیاز به تأیید دستی)
+    if payment_type == "reseller":
+        from handlers_reseller import apply_reseller_topup
+        ok, info = apply_reseller_topup(payment)
+        if not ok:
+            bot.answer_callback_query(call.id, f"خطا: {info}", show_alert=True)
+            return
+        db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
+        bot.answer_callback_query(call.id, "✅ تأیید شد و حجم به استخر نماینده اضافه شد.")
         payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
         return
 
