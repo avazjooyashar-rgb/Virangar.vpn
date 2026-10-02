@@ -151,6 +151,30 @@ def _process_service(svc):
         _notify_pool_exhausted(svc["reseller_id"], pool["name"], disabled_count)
 
 
+def refresh_pool(pool_id):
+    """
+    بروزرسانیِ فوریِ مصرفِ همه‌ی مشتری‌های یه استخرِ مشخص (برای دکمه‌ی
+    «🔄 بروزرسانی» تو پنل نماینده)، بدون نیاز به صبر کردن برای تیک
+    بعدیِ کارگر پس‌زمینه.
+    """
+    pool = db_execute("SELECT * FROM reseller_panels WHERE id=?", (pool_id,), fetchone=True)
+    if not pool:
+        return False
+
+    services = db_execute("""
+    SELECT * FROM services
+    WHERE reseller_id=? AND panel_id=? AND status='active'
+    """, (pool["user_id"], pool["panel_id"]), fetchall=True) or []
+
+    for svc in services:
+        try:
+            _process_service(svc)
+        except Exception:
+            logger.exception("refresh_pool: processing service %s failed", svc["id"])
+
+    return True
+
+
 def _loop():
     logger.info("reseller_billing: background worker started")
     while True:
