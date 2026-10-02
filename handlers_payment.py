@@ -10,7 +10,7 @@ from models import internal_user_id, is_superadmin, get_user
 from pasarguard_api import pasarguard_create_service
 from services import create_local_service
 from decorators import admin_only
-from keyboards import admin_keyboard
+from keyboards import admin_keyboard, user_keyboard
 from datetime import datetime
 import chat_clean as cc
 
@@ -697,7 +697,8 @@ def reject_payment(call):
         bot.send_message(
             user["telegram_id"],
             "❌  رسید پرداخت شما رد شد.\n\n"
-            "در صورت اشتباه، دوباره اقدام کنید."
+            "در صورت اشتباه، دوباره اقدام کنید.",
+            reply_markup=user_keyboard(is_super_admin=is_superadmin(user["telegram_id"]))
         )
     bot.answer_callback_query(call.id, "پرداخت رد شد ❌ ")
     payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
