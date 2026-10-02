@@ -1,5 +1,6 @@
 # ============================================================
-# handlers_reseller.py
+# handlers_reseller.py  [نسخه: می‌پرسه حجم/مدت/دستگاه — اگه این خط رو
+# تو فایل سرورت نمی‌بینی یعنی فایل قدیمی هنوز جایگزین نشده]
 # پنل نمایندگی از دید کاربر:
 #   - خرید حجم نمایندگی (کارت به کارت، نیاز به تأیید ادمین)
 #   - پنل‌های من = استخرهای حجمی که در هر پنل داره
@@ -13,14 +14,23 @@
 # ============================================================
 
 import re
+from datetime import datetime, timedelta
 
 from telebot import types
 
 from config import bot
 from database import db_execute, get_setting, now
 from models import get_user, internal_user_id
-from pasarguard_api import pasarguard_create_unlimited_service, pasarguard_set_status, pasarguard_delete_service
+from pasarguard_api import (
+    pasarguard_create_unlimited_service,
+    pasarguard_create_service,
+    pasarguard_set_status,
+    pasarguard_delete_service,
+)
 import chat_clean as cc
+
+# فلوی چندمرحله‌ایِ «ساخت سرویس برای مشتری» (حجم/زمان/تعداد کاربر)
+_draft = {}  # chat_id -> dict
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,20}$")
 
@@ -48,12 +58,21 @@ def _home_markup():
 
 
 def _get_pool(pool_id, owner_user_id):
+    """
+    عمداً اسم واقعیِ پنل (که فقط سوپرادمین می‌بینه) اینجا برنمی‌گرده؛
+    به‌جاش اسمِ پلن نمایندگی (همونی که خود نماینده موقع خرید دیده)
+    به‌عنوان برچسب استخر نشون داده میشه.
+    """
     return db_execute("""
-    SELECT reseller_panels.*, panels.name AS panel_name
+    SELECT reseller_panels.*, reseller_plans.name AS pool_label
     FROM reseller_panels
-    LEFT JOIN panels ON panels.id = reseller_panels.panel_id
+    LEFT JOIN reseller_plans ON reseller_plans.id = reseller_panels.reseller_plan_id
     WHERE reseller_panels.id=? AND reseller_panels.user_id=?
     """, (pool_id, owner_user_id), fetchone=True)
+
+
+def _pool_label(pool):
+    return pool["pool_label"] or f"استخر #{pool['id']}"
 
 
 def _fmt_gb(value):
@@ -159,7 +178,6 @@ def resplan_detail(call):
     render(
         call.message.chat.id,
         f"🤝 <b>{plan['name']}</b>\n\n"
-        f"🖥 پنل: {plan['panel_name'] or '---'}\n"
         f"📊 حجم: {_fmt_gb(plan['volume_gb'])} گیگ\n"
         f"💰 قیمت: {plan['price']:,} تومان\n\n"
         "⏳ بدون محدودیت زمانی — تا هر وقت حجمش تموم نشه می‌تونی ازش بفروشی.\n\n"
@@ -327,9 +345,9 @@ def res_pools(call):
     user_id = internal_user_id(call.from_user.id)
 
     pools = db_execute("""
-    SELECT reseller_panels.*, panels.name AS panel_name
+    SELECT reseller_panels.*, reseller_plans.name AS pool_label
     FROM reseller_panels
-    LEFT JOIN panels ON panels.id = reseller_panels.panel_id
+    LEFT JOIN reseller_plans ON reseller_plans.id = reseller_panels.reseller_plan_id
     WHERE reseller_panels.user_id=?
     ORDER BY reseller_panels.id DESC
     """, (user_id,), fetchall=True) or []
@@ -345,7 +363,7 @@ def res_pools(call):
     for pool in pools:
         icon = "🟢" if pool["active"] and (pool["balance"] or 0) > 0 else "🔴"
         kb.add(types.InlineKeyboardButton(
-            f"{icon} {pool['panel_name'] or '---'} — {_fmt_gb(pool['balance'])}GB باقیمونده",
+            f"{icon} {_pool_label(pool)} — {_fmt_gb(pool['balance'])}GB باقیمونده",
             callback_data=f"respool:{pool['id']}"
         ))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
@@ -374,7 +392,7 @@ def respool_detail(call):
 
     render(
         call.message.chat.id,
-        f"🖥 <b>{pool['panel_name'] or '---'}</b>\n\n"
+        f"🖥 <b>{_pool_label(pool)}</b>\n\n"
         f"وضعیت: {status_line}\n"
         f"📊 باقیمونده: <b>{_fmt_gb(pool['balance'])}</b> گیگ\n"
         f"📦 مجموع خریداری‌شده: {_fmt_gb(pool['total_purchased'])} گیگ",
@@ -452,36 +470,170 @@ def resnew_name(message, pool_id):
         _reask(f"❌ نام «{raw}» قبلاً استفاده شده. یه نام دیگه بفرست:")
         return
 
-    kb2 = types.InlineKeyboardMarkup()
-    kb2.row(
-        types.InlineKeyboardButton("✅ بساز", callback_data=f"resmk:{pool_id}:{raw}"),
-        types.InlineKeyboardButton("❌ انصراف", callback_data=f"respool:{pool_id}"),
-    )
+    _draft[chat_id] = {"pool_id": pool_id, "raw": raw}
 
     text = (
-        "🔎 مشخصات سرویس مشتری:\n\n"
-        f"🖥 پنل: {pool['panel_name'] or '---'}\n"
-        f"👤 نام کاربری: <code>{final_username}</code>\n"
-        f"📊 استخر باقیمونده: {_fmt_gb(pool['balance'])} گیگ\n\n"
-        "این سرویس بدون سقف حجم/زمان جداگونه ساخته میشه؛ فقط از همین استخر مصرف می‌کنه. تایید می‌کنی؟"
+        f"📊 این مشتری چند گیگ داشته باشه؟ (فقط عدد)\n\n"
+        f"باقیمونده‌ی استخرت: {_fmt_gb(pool['balance'])} گیگ"
     )
     if screen_id:
         try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb2, parse_mode="HTML")
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+        except Exception:
+            cc.show(chat_id, text, reply_markup=kb)
+    else:
+        cc.show(chat_id, text, reply_markup=kb)
+    bot.register_next_step_handler_by_chat_id(chat_id, resnew_volume, pool_id)
+
+
+def resnew_volume(message, pool_id):
+    chat_id = message.chat.id
+    cc.drop(message)
+    draft = _draft.get(chat_id)
+    if not draft:
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+    screen_id = cc.get_screen(chat_id)
+
+    text = (message.text or "").strip().replace(",", ".")
+    try:
+        volume = float(text)
+        if volume <= 0:
+            raise ValueError
+    except ValueError:
+        err = "❌ فقط عدد بزرگ‌تر از صفر بفرست:"
+        if screen_id:
+            try:
+                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, err, reply_markup=kb)
+        else:
+            cc.show(chat_id, err, reply_markup=kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, resnew_volume, pool_id)
+        return
+
+    draft["volume"] = volume
+    prompt = "⏳ چند روز اعتبار داشته باشه؟ (فقط عدد)"
+    if screen_id:
+        try:
+            bot.edit_message_text(prompt, chat_id, screen_id, reply_markup=kb)
+        except Exception:
+            cc.show(chat_id, prompt, reply_markup=kb)
+    else:
+        cc.show(chat_id, prompt, reply_markup=kb)
+    bot.register_next_step_handler_by_chat_id(chat_id, resnew_duration, pool_id)
+
+
+def resnew_duration(message, pool_id):
+    chat_id = message.chat.id
+    cc.drop(message)
+    draft = _draft.get(chat_id)
+    if not draft:
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+    screen_id = cc.get_screen(chat_id)
+
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        err = "❌ فقط عدد روز (بزرگ‌تر از صفر) بفرست:"
+        if screen_id:
+            try:
+                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, err, reply_markup=kb)
+        else:
+            cc.show(chat_id, err, reply_markup=kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, resnew_duration, pool_id)
+        return
+
+    draft["duration"] = int(text)
+    prompt = "📱 چند تا دستگاه همزمان مجاز باشه؟ (فقط عدد)"
+    if screen_id:
+        try:
+            bot.edit_message_text(prompt, chat_id, screen_id, reply_markup=kb)
+        except Exception:
+            cc.show(chat_id, prompt, reply_markup=kb)
+    else:
+        cc.show(chat_id, prompt, reply_markup=kb)
+    bot.register_next_step_handler_by_chat_id(chat_id, resnew_devices, pool_id)
+
+
+def resnew_devices(message, pool_id):
+    chat_id = message.chat.id
+    cc.drop(message)
+    draft = _draft.get(chat_id)
+    if not draft:
+        return
+
+    user_id = internal_user_id(message.from_user.id)
+    pool = _get_pool(pool_id, user_id)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+    screen_id = cc.get_screen(chat_id)
+
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        err = "❌ فقط عدد بزرگ‌تر از صفر بفرست:"
+        if screen_id:
+            try:
+                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
+            except Exception:
+                cc.show(chat_id, err, reply_markup=kb)
+        else:
+            cc.show(chat_id, err, reply_markup=kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, resnew_devices, pool_id)
+        return
+
+    draft["devices"] = int(text)
+
+    if not pool or (pool["balance"] or 0) <= 0:
+        _draft.pop(chat_id, None)
+        cc.show(chat_id, "❌ این استخر دیگه موجودی نداره.", reply_markup=_home_markup())
+        return
+
+    final_username = _sanitize_customer_name(user_id, draft["raw"])
+    kb2 = types.InlineKeyboardMarkup()
+    kb2.row(
+        types.InlineKeyboardButton("✅ بساز", callback_data="resmk_confirm"),
+        types.InlineKeyboardButton("❌ انصراف", callback_data=f"respool:{pool_id}"),
+    )
+
+    text2 = (
+        "🔎 <b>مشخصات سرویس مشتری</b>\n\n"
+        f"🏷 استخر: {_pool_label(pool)}\n"
+        f"👤 نام کاربری: <code>{final_username}</code>\n"
+        f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ\n"
+        f"⏳ مدت: {draft['duration']} روز\n"
+        f"📱 دستگاه: {draft['devices']}\n\n"
+        "مصرف واقعی این مشتری از استخرت کم میشه. تایید می‌کنی؟"
+    )
+    if screen_id:
+        try:
+            bot.edit_message_text(text2, chat_id, screen_id, reply_markup=kb2, parse_mode="HTML")
             return
         except Exception:
             pass
-    cc.show(chat_id, text, reply_markup=kb2, parse_mode="HTML")
+    cc.show(chat_id, text2, reply_markup=kb2, parse_mode="HTML")
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("resmk:"))
+@bot.callback_query_handler(func=lambda call: call.data == "resmk_confirm")
 def resnew_confirm(call):
-    _, pool_id, raw = call.data.split(":", 2)
-    pool_id = int(pool_id)
+    chat_id = call.message.chat.id
+    draft = _draft.get(chat_id)
+    if not draft:
+        bot.answer_callback_query(call.id, "⛔ این مرحله منقضی شده، دوباره از اول بزن.", show_alert=True)
+        return
+
+    pool_id = draft["pool_id"]
     user_id = internal_user_id(call.from_user.id)
     pool = _get_pool(pool_id, user_id)
 
     if not pool or (pool["balance"] or 0) <= 0:
+        _draft.pop(chat_id, None)
         bot.answer_callback_query(call.id, "این استخر دیگه موجودی نداره.", show_alert=True)
         return
 
@@ -490,23 +642,31 @@ def resnew_confirm(call):
         bot.answer_callback_query(call.id, "پنل این استخر پیدا نشد.", show_alert=True)
         return
 
-    final_username = _sanitize_customer_name(user_id, raw)
-
+    final_username = _sanitize_customer_name(user_id, draft["raw"])
     if db_execute("SELECT id FROM services WHERE username=?", (final_username,), fetchone=True):
-        bot.answer_callback_query(call.id, "این نام همین الان گرفته شد، یه نام دیگه امتحان کن.", show_alert=True)
+        _draft.pop(chat_id, None)
+        bot.answer_callback_query(call.id, "این نام همین الان گرفته شد، از اول با یه نام دیگه امتحان کن.", show_alert=True)
         return
 
     bot.answer_callback_query(call.id, "⏳ در حال ساخت سرویس...")
-    chat_id = call.message.chat.id
-
     try:
         bot.edit_message_text("⏳ در حال ساخت سرویس...", chat_id, call.message.message_id)
     except Exception:
         pass
 
-    result = pasarguard_create_unlimited_service(
-        panel,
-        note=f"Reseller | owner_user_id:{user_id} | pool:{pool_id}",
+    fake_plan = {
+        "name": f"Reseller:{pool_id}",
+        "price": 0,
+        "volume": draft["volume"],
+        "duration": draft["duration"],
+        "devices": draft["devices"],
+    }
+    owner = {"telegram_id": f"reseller{user_id}"}
+
+    result = pasarguard_create_service(
+        panel=panel,
+        telegram_user=owner,
+        plan=fake_plan,
         desired_username=final_username
     )
 
@@ -519,7 +679,10 @@ def resnew_confirm(call):
             f"❌ ساخت سرویس ناموفق بود.\n\n<code>{result.get('error', 'نامشخص')}</code>",
             kb_back, call.message.message_id
         )
+        _draft.pop(chat_id, None)
         return
+
+    expires_at = (datetime.utcnow() + timedelta(days=draft["duration"])).strftime("%Y-%m-%d %H:%M:%S")
 
     db_execute("""
     INSERT INTO services
@@ -527,16 +690,20 @@ def resnew_confirm(call):
      volume, used_volume, duration, devices,
      expires_at, status, reseller_id, is_unlimited,
      created_at, updated_at)
-    VALUES (?, NULL, ?, ?, ?, '', 0, 0, 0, 1, NULL, 'active', ?, 1, ?, ?)
+    VALUES (?, NULL, ?, ?, ?, '', ?, 0, ?, ?, ?, 'active', ?, 0, ?, ?)
     """, (
         user_id, pool["panel_id"], result.get("username", final_username),
-        result.get("config", ""), user_id, now(), now()
+        result.get("config", ""), draft["volume"], draft["duration"], draft["devices"],
+        expires_at, user_id, now(), now()
     ))
+
+    _draft.pop(chat_id, None)
 
     render(
         chat_id,
         "🎉 <b>سرویس مشتری ساخته شد!</b>\n\n"
-        f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n\n"
+        f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n"
+        f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ | ⏳ {draft['duration']} روز | 📱 {draft['devices']} دستگاه\n\n"
         f"🔗 لینک اشتراک (این رو به مشتریت بده):\n<code>{result.get('config', '---')}</code>",
         kb_back, call.message.message_id
     )
@@ -553,7 +720,7 @@ def res_customers(call):
 
     services = db_execute("""
     SELECT * FROM services
-    WHERE reseller_id=? AND is_unlimited=1
+    WHERE reseller_id=?
     ORDER BY id DESC
     LIMIT 50
     """, (user_id,), fetchall=True) or []
@@ -723,11 +890,11 @@ def res_stats(call):
     total_purchased = sum((p["total_purchased"] or 0) for p in pools)
 
     customers_count = db_execute(
-        "SELECT COUNT(*) c FROM services WHERE reseller_id=? AND is_unlimited=1",
+        "SELECT COUNT(*) c FROM services WHERE reseller_id=?",
         (user_id,), fetchone=True
     )["c"]
     active_count = db_execute(
-        "SELECT COUNT(*) c FROM services WHERE reseller_id=? AND is_unlimited=1 AND status='active'",
+        "SELECT COUNT(*) c FROM services WHERE reseller_id=? AND status='active'",
         (user_id,), fetchone=True
     )["c"]
 
