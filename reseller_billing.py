@@ -43,7 +43,7 @@ def _disable_pool_services(reseller_user_id, panel_id, panel):
     """
     siblings = db_execute("""
     SELECT * FROM services
-    WHERE reseller_id=? AND panel_id=? AND status='active' AND is_unlimited=1
+    WHERE reseller_id=? AND panel_id=? AND status='active'
     """, (reseller_user_id, panel_id), fetchall=True) or []
 
     disabled_count = 0
@@ -84,10 +84,14 @@ def _notify_pool_exhausted(reseller_user_id, pool_name, disabled_count):
 
 
 def _tick():
-    """یه دور کامل چک مصرفِ همه‌ی سرویس‌های نامحدودِ زیرمجموعه‌ی نماینده‌ها."""
+    """
+    یه دور کامل چک مصرفِ همه‌ی سرویس‌های زیرمجموعه‌ی نماینده‌ها —
+    چه سقف‌دار (حجم/زمان مشخص) چه نامحدود، فرقی نداره؛ مصرف واقعی هر
+    دوتاشون از استخر نماینده کم میشه.
+    """
     services = db_execute("""
     SELECT * FROM services
-    WHERE is_unlimited=1 AND status='active' AND reseller_id IS NOT NULL
+    WHERE status='active' AND reseller_id IS NOT NULL
     """, fetchall=True) or []
 
     for svc in services:
