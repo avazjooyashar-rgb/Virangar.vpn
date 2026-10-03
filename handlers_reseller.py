@@ -28,6 +28,7 @@ from pasarguard_api import (
     pasarguard_delete_service,
 )
 import chat_clean as cc
+import reseller_billing
 
 # فلوی چندمرحله‌ایِ «ساخت سرویس برای مشتری» (حجم/زمان/تعداد کاربر)
 _draft = {}  # chat_id -> dict
@@ -73,6 +74,16 @@ def _get_pool(pool_id, owner_user_id):
 
 def _pool_label(pool):
     return pool["pool_label"] or f"استخر #{pool['id']}"
+
+
+def _progress_bar(used, total, length=10):
+    total = total or 0
+    if total <= 0:
+        pct = 0
+    else:
+        pct = min(1, max(0, used) / total)
+    filled = int(pct * length)
+    return "🟩" * filled + "⬜️" * (length - filled) + f"  {int(pct * 100)}٪"
 
 
 def _fmt_gb(value):
@@ -363,12 +374,62 @@ def res_pools(call):
     for pool in pools:
         icon = "🟢" if pool["active"] and (pool["balance"] or 0) > 0 else "🔴"
         kb.add(types.InlineKeyboardButton(
-            f"{icon} {_pool_label(pool)} — {_fmt_gb(pool['balance'])}GB باقیمونده",
+            f"{icon} {_pool_label(pool)}",
             callback_data=f"respool:{pool['id']}"
         ))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
 
-    render(call.message.chat.id, "🖥 <b>پنل‌های من (استخر حجم)</b>\n\nروی هرکدوم بزن:", kb, call.message.message_id)
+    render(call.message.chat.id, "🖥 <b>پنل‌های من</b>\n\nروی هرکدوم بزن:", kb, call.message.message_id)
+
+
+def _pool_customer_stats(pool):
+    row = db_execute("""
+    SELECT COUNT(*) AS total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active
+    FROM services
+    WHERE reseller_id=? AND panel_id=?
+    """, (pool["user_id"], pool["panel_id"]), fetchone=True)
+    total = row["total"] or 0
+    active = row["active"] or 0
+    return active, total
+
+
+def _render_pool_detail(chat_id, pool_id, message_id=None):
+    pool = db_execute("SELECT * FROM reseller_panels WHERE id=?", (pool_id,), fetchone=True)
+
+    if not pool:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_pools"))
+        render(chat_id, "❌ این استخر دیگه وجود نداره.", kb, message_id)
+        return
+
+    active_customers, total_customers = _pool_customer_stats(pool)
+
+    balance = pool["balance"] or 0
+    total_purchased = pool["total_purchased"] or 0
+    used = max(0, total_purchased - balance)
+
+    status_line = "🟢 فعال" if pool["active"] and balance > 0 else "🔴 تموم‌شده / غیرفعال"
+
+    kb = types.InlineKeyboardMarkup()
+    if balance > 0:
+        kb.add(types.InlineKeyboardButton("➕ ساخت سرویس برای مشتری", callback_data=f"resnew:{pool_id}"))
+    kb.row(
+        types.InlineKeyboardButton("👥 مشتری‌های این پنل", callback_data=f"respoolcust:{pool_id}"),
+        types.InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"respoolrefresh:{pool_id}"),
+    )
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_pools"))
+
+    text = (
+        f"🖥 <b>{_pool_label(pool)}</b>\n\n"
+        f"وضعیت: {status_line}\n\n"
+        f"📊 <b>مصرف از استخر</b>\n"
+        f"{_progress_bar(used, total_purchased)}\n"
+        f"مصرف‌شده: {_fmt_gb(used)} GB از {_fmt_gb(total_purchased)} GB\n"
+        f"باقیمونده: <b>{_fmt_gb(balance)} GB</b>\n\n"
+        f"👥 مشتری‌ها: {active_customers} فعال از {total_customers} کل"
+    )
+
+    render(chat_id, text, kb, message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respool:"))
@@ -382,22 +443,61 @@ def respool_detail(call):
         return
 
     bot.answer_callback_query(call.id)
+    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id)
 
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("respoolrefresh:"))
+def respool_refresh(call):
+    pool_id = int(call.data.split(":")[1])
+    user_id = internal_user_id(call.from_user.id)
+    pool = _get_pool(pool_id, user_id)
+
+    if not pool:
+        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+        return
+
+    bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی مصرف...")
+    try:
+        reseller_billing.refresh_pool(pool_id)
+    except Exception:
+        pass
+    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("respoolcust:"))
+def respool_customers(call):
+    pool_id = int(call.data.split(":")[1])
+    user_id = internal_user_id(call.from_user.id)
+    pool = _get_pool(pool_id, user_id)
+
+    if not pool:
+        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+        return
+
+    services = db_execute("""
+    SELECT * FROM services
+    WHERE reseller_id=? AND panel_id=?
+    ORDER BY id DESC
+    LIMIT 50
+    """, (pool["user_id"], pool["panel_id"]), fetchall=True) or []
+
+    bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup()
-    if (pool["balance"] or 0) > 0:
-        kb.add(types.InlineKeyboardButton("➕ ساخت سرویس برای مشتری", callback_data=f"resnew:{pool_id}"))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_pools"))
 
-    status_line = "🟢 فعال" if pool["active"] and (pool["balance"] or 0) > 0 else "🔴 تموم‌شده / غیرفعال"
+    if not services:
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+        render(call.message.chat.id, "📭 هنوز برای این پنل مشتری‌ای نساختی.", kb, call.message.message_id)
+        return
+
+    for svc in services:
+        icon = "🟢" if svc["status"] == "active" else "🔴"
+        kb.add(types.InlineKeyboardButton(f"{icon} {svc['username']}", callback_data=f"rescust:{svc['id']}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
 
     render(
         call.message.chat.id,
-        f"🖥 <b>{_pool_label(pool)}</b>\n\n"
-        f"وضعیت: {status_line}\n"
-        f"📊 باقیمونده: <b>{_fmt_gb(pool['balance'])}</b> گیگ\n"
-        f"📦 مجموع خریداری‌شده: {_fmt_gb(pool['total_purchased'])} گیگ",
-        kb,
-        call.message.message_id
+        f"👥 <b>مشتری‌های {_pool_label(pool)}</b>\n\nروی هرکدوم بزن:",
+        kb, call.message.message_id
     )
 
 
