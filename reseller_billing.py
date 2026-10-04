@@ -151,6 +151,19 @@ def _process_service(svc):
         _notify_pool_exhausted(svc["reseller_id"], pool["name"], disabled_count)
 
 
+def refresh_service(service_id):
+    """بروزرسانیِ فوریِ مصرفِ یه سرویسِ مشتری مشخص (برای دکمه‌ی بروزرسانی تو صفحه‌ی همون مشتری)."""
+    svc = db_execute("SELECT * FROM services WHERE id=?", (service_id,), fetchone=True)
+    if not svc or not svc["reseller_id"]:
+        return False
+    try:
+        _process_service(svc)
+    except Exception:
+        logger.exception("refresh_service: processing service %s failed", service_id)
+        return False
+    return True
+
+
 def refresh_pool(pool_id):
     """
     بروزرسانیِ فوریِ مصرفِ همه‌ی مشتری‌های یه استخرِ مشخص (برای دکمه‌ی
