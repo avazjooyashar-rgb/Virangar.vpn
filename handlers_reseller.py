@@ -157,13 +157,17 @@ def res_buy(call):
         return
 
     for plan in plans:
-        kb.add(types.InlineKeyboardButton(
-            f"🤝 {plan['name']} | {_fmt_gb(plan['volume_gb'])}GB | {plan['price']:,} تومان",
-            callback_data=f"resplan:{plan['id']}"
-        ))
+        kb.add(types.InlineKeyboardButton(f"🤝 {plan['name']}", callback_data=f"resplan:{plan['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
 
     render(call.message.chat.id, "🤝 <b>خرید حجم نمایندگی</b>\n\nیه پلن انتخاب کن:", kb, call.message.message_id)
+
+
+def _plan_tiers(plan_id):
+    return db_execute(
+        "SELECT * FROM reseller_plan_tiers WHERE plan_id=? ORDER BY sort_order, volume_gb",
+        (plan_id,), fetchall=True
+    ) or []
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resplan:"))
@@ -181,63 +185,191 @@ def resplan_detail(call):
         return
 
     bot.answer_callback_query(call.id)
+    tiers = _plan_tiers(plan_id)
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("💳 پرداخت کارت به کارت", callback_data=f"respay:{plan_id}"))
+    for tier in tiers:
+        kb.add(types.InlineKeyboardButton(
+            f"📦 {_fmt_gb(tier['volume_gb'])}GB — {tier['price']:,} تومان",
+            callback_data=f"respaytier:{tier['id']}"
+        ))
+    if plan["price_per_gb"] and plan["price_per_gb"] > 0:
+        kb.add(types.InlineKeyboardButton("💬 حجم دلخواه", callback_data=f"rescustomvol:{plan_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_buy"))
 
-    render(
-        call.message.chat.id,
-        f"🤝 <b>{plan['name']}</b>\n\n"
-        f"📊 حجم: {_fmt_gb(plan['volume_gb'])} گیگ\n"
-        f"💰 قیمت: {plan['price']:,} تومان\n\n"
-        "⏳ بدون محدودیت زمانی — تا هر وقت حجمش تموم نشه می‌تونی ازش بفروشی.\n\n"
-        "با خرید بیشتر از همین پلن، حجمش به استخر قبلیت اضافه میشه (جمع میشه).",
-        kb,
-        call.message.message_id
+    lines = [f"🤝 <b>{plan['name']}</b>\n"]
+    if not tiers and not (plan["price_per_gb"] and plan["price_per_gb"] > 0):
+        lines.append("📭 فعلاً هیچ گزینه‌ی خریدی براش تعریف نشده.")
+    else:
+        if tiers:
+            lines.append("یکی از حجم‌های آماده رو انتخاب کن:")
+        if plan["price_per_gb"] and plan["price_per_gb"] > 0:
+            lines.append(
+                f"یا «💬 حجم دلخواه» (حداقل {_fmt_gb(plan['custom_min_gb'] or 300)} گیگ، "
+                f"هر گیگ {plan['price_per_gb']:,} تومان)"
+            )
+    lines.append(
+        "\n⏳ بدون محدودیت زمانی. با هر خرید بیشتر، حجم به استخر قبلیت اضافه میشه (جمع میشه)."
     )
 
+    render(call.message.chat.id, "\n".join(lines), kb, call.message.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("respay:"))
-def respay_start(call):
-    plan_id = int(call.data.split(":")[1])
-    plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
 
-    if not plan:
-        bot.answer_callback_query(call.id, "این پلن دیگر موجود نیست.", show_alert=True)
-        return
-
+def _start_payment(chat_id, message_id, back_cb, volume_gb, price, reseller_plan_id):
     card = get_setting("card_number", "")
     holder = get_setting("card_holder", "")
 
     if not card:
-        bot.answer_callback_query(call.id, "پرداخت کارت به کارت فعلاً تنظیم نشده.", show_alert=True)
+        cc.show(chat_id, "❌ پرداخت کارت به کارت فعلاً تنظیم نشده.")
         return
 
-    bot.answer_callback_query(call.id)
-    chat_id = call.message.chat.id
-
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 انصراف", callback_data=f"resplan:{plan_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 انصراف", callback_data=back_cb))
 
     render(
         chat_id,
-        f"💳 مبلغ <b>{plan['price']:,} تومان</b> رو به کارت زیر انتقال بده:\n\n"
+        f"📦 حجم: <b>{_fmt_gb(volume_gb)} GB</b>\n"
+        f"💳 مبلغ <b>{price:,} تومان</b> رو به کارت زیر انتقال بده:\n\n"
         f"<code>{card}</code>\n"
         f"👤 {holder or '---'}\n\n"
         "بعد از انتقال، تصویر رسید رو همینجا بفرست.",
         kb,
-        call.message.message_id
+        message_id
     )
-    bot.register_next_step_handler_by_chat_id(chat_id, respay_receipt, plan_id)
+    bot.register_next_step_handler_by_chat_id(
+        chat_id, respay_receipt, reseller_plan_id, volume_gb, price, back_cb
+    )
 
 
-def respay_receipt(message, plan_id):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("respaytier:"))
+def respaytier_start(call):
+    tier_id = int(call.data.split(":")[1])
+    tier = db_execute("SELECT * FROM reseller_plan_tiers WHERE id=?", (tier_id,), fetchone=True)
+    if not tier:
+        bot.answer_callback_query(call.id, "این گزینه دیگر موجود نیست.", show_alert=True)
+        return
+
+    bot.answer_callback_query(call.id)
+    _start_payment(
+        call.message.chat.id, call.message.message_id,
+        back_cb=f"resplan:{tier['plan_id']}",
+        volume_gb=tier["volume_gb"], price=tier["price"],
+        reseller_plan_id=tier["plan_id"]
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rescustomvol:"))
+def rescustomvol_start(call):
+    plan_id = int(call.data.split(":")[1])
+    plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
+    if not plan or not plan["price_per_gb"]:
+        bot.answer_callback_query(call.id, "این پلن حجم دلخواه نداره.", show_alert=True)
+        return
+
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    min_gb = plan["custom_min_gb"] or 300
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"resplan:{plan_id}"))
+
+    render(
+        chat_id,
+        f"💬 چند گیگ می‌خوای؟ (فقط عدد، حداقل {_fmt_gb(min_gb)} گیگ)\n\n"
+        f"هر گیگ: {plan['price_per_gb']:,} تومان",
+        kb, call.message.message_id
+    )
+    bot.register_next_step_handler_by_chat_id(chat_id, _customvol_amount, plan_id)
+
+
+def _customvol_amount(message, plan_id):
+    chat_id = message.chat.id
+    cc.drop(message)
+    screen_id = cc.get_screen(chat_id)
+
+    plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
+    kb_back = types.InlineKeyboardMarkup()
+    kb_back.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"resplan:{plan_id}"))
+
+    if not plan or not plan["price_per_gb"]:
+        text = "❌ این پلن دیگه موجود نیست."
+        if screen_id:
+            try:
+                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb_back)
+                return
+            except Exception:
+                pass
+        cc.show(chat_id, text, reply_markup=kb_back)
+        return
+
+    min_gb = plan["custom_min_gb"] or 300
+    text_raw = (message.text or "").strip().replace(",", "")
+
+    try:
+        amount = float(text_raw)
+    except ValueError:
+        amount = -1
+
+    if amount < min_gb:
+        text = f"❌ حداقل {_fmt_gb(min_gb)} گیگ باید باشه. دوباره یه عدد بفرست:"
+        if screen_id:
+            try:
+                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb_back)
+            except Exception:
+                cc.show(chat_id, text, reply_markup=kb_back)
+        else:
+            cc.show(chat_id, text, reply_markup=kb_back)
+        bot.register_next_step_handler_by_chat_id(chat_id, _customvol_amount, plan_id)
+        return
+
+    price = round(amount * plan["price_per_gb"])
+    back_cb = f"resplan:{plan_id}"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("✅ تایید و پرداخت", callback_data=f"rescustomvol_go:{plan_id}:{amount}"),
+        types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb),
+    )
+    text = (
+        f"📦 حجم: <b>{_fmt_gb(amount)} GB</b>\n"
+        f"💰 مبلغ: <b>{price:,} تومان</b>\n\n"
+        "تایید می‌کنی؟"
+    )
+    if screen_id:
+        try:
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    cc.show(chat_id, text, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rescustomvol_go:"))
+def rescustomvol_go(call):
+    _, plan_id, amount = call.data.split(":")
+    plan_id = int(plan_id)
+    amount = float(amount)
+
+    plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
+    if not plan or not plan["price_per_gb"]:
+        bot.answer_callback_query(call.id, "این پلن دیگه موجود نیست.", show_alert=True)
+        return
+
+    price = round(amount * plan["price_per_gb"])
+    bot.answer_callback_query(call.id)
+    _start_payment(
+        call.message.chat.id, call.message.message_id,
+        back_cb=f"resplan:{plan_id}",
+        volume_gb=amount, price=price, reseller_plan_id=plan_id
+    )
+
+
+def respay_receipt(message, reseller_plan_id, volume_gb, price, back_cb):
     chat_id = message.chat.id
     cc.drop(message)
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 انصراف", callback_data=f"resplan:{plan_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 انصراف", callback_data=back_cb))
     screen_id = cc.get_screen(chat_id)
 
     if not message.photo:
@@ -249,12 +381,9 @@ def respay_receipt(message, plan_id):
                 cc.show(chat_id, text, reply_markup=kb)
         else:
             cc.show(chat_id, text, reply_markup=kb)
-        bot.register_next_step_handler_by_chat_id(chat_id, respay_receipt, plan_id)
-        return
-
-    plan = db_execute("SELECT * FROM reseller_plans WHERE id=?", (plan_id,), fetchone=True)
-    if not plan:
-        cc.show(chat_id, "❌ این پلن دیگر موجود نیست.", reply_markup=_home_markup())
+        bot.register_next_step_handler_by_chat_id(
+            chat_id, respay_receipt, reseller_plan_id, volume_gb, price, back_cb
+        )
         return
 
     user_id = internal_user_id(message.from_user.id)
@@ -264,12 +393,12 @@ def respay_receipt(message, plan_id):
     INSERT INTO payments
     (user_id, plan_id, amount, method,
      receipt_file_id, receipt_type,
-     type, reseller_plan_id,
+     type, reseller_plan_id, reseller_volume_gb,
      status, created_at, updated_at)
     VALUES (?, NULL, ?, 'manual', ?, 'photo',
-            'reseller', ?, 'pending', ?, ?)
+            'reseller', ?, ?, 'pending', ?, ?)
     """, (
-        user_id, plan["price"], file_id, plan_id, now(), now()
+        user_id, price, file_id, reseller_plan_id, volume_gb, now(), now()
     ))
 
     ok_kb = types.InlineKeyboardMarkup()
@@ -306,7 +435,12 @@ def apply_reseller_topup(payment):
     if not panel_id:
         return False, "این پلن نمایندگی به هیچ پنلی وصل نیست"
 
-    volume = rplan["volume_gb"] or 0
+    # حجم واقعیِ همین خرید (تیر انتخابی یا مقدار دلخواه)؛ برای
+    # پرداخت‌های خیلی قدیمی که این ستون رو نداشتن، از حجم خودِ پلن
+    # استفاده می‌شه (سازگاری با عقب).
+    volume = payment["reseller_volume_gb"] if "reseller_volume_gb" in payment.keys() else None
+    if not volume:
+        volume = rplan["volume_gb"] or 0
     user_id = payment["user_id"]
 
     pool = db_execute(
@@ -491,7 +625,10 @@ def respool_customers(call):
 
     for svc in services:
         icon = "🟢" if svc["status"] == "active" else "🔴"
-        kb.add(types.InlineKeyboardButton(f"{icon} {svc['username']}", callback_data=f"rescust:{svc['id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"{icon} {svc['username']}",
+            callback_data=f"rescust:{svc['id']}:respoolcust:{pool_id}"
+        ))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
 
     render(
@@ -840,46 +977,96 @@ def res_customers(call):
     render(call.message.chat.id, "👥 <b>کاربران من</b>\n\nروی هرکدوم بزن:", kb, call.message.message_id)
 
 
+def _days_left(expires_at):
+    if not expires_at:
+        return None
+    try:
+        expire_dt = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+        return (expire_dt - datetime.utcnow()).days
+    except Exception:
+        return None
+
+
+def _render_customer_detail(chat_id, service_id, owner_user_id, message_id=None, back_cb="res_customers"):
+    svc = db_execute(
+        "SELECT * FROM services WHERE id=? AND reseller_id=?",
+        (service_id, owner_user_id), fetchone=True
+    )
+    if not svc:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb))
+        render(chat_id, "❌ این سرویس دیگه وجود نداره.", kb, message_id)
+        return
+
+    status_label = "🟢 فعال" if svc["status"] == "active" else "🔴 غیرفعال"
+
+    used = svc["used_volume"] or 0
+    total = svc["volume"] or 0
+    remaining = max(0, total - used)
+
+    days_left = _days_left(svc["expires_at"])
+    if days_left is None:
+        days_text = "نامشخص"
+    elif days_left < 0:
+        days_text = "منقضی شده ❗️"
+    else:
+        days_text = f"{days_left} روز"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("🔄 بروزرسانی مصرف", callback_data=f"rescustrefresh:{service_id}:{back_cb}"),
+    )
+    if svc["status"] == "active":
+        kb.add(types.InlineKeyboardButton("⏸ غیرفعال کردن دستی", callback_data=f"respause:{service_id}"))
+    else:
+        kb.add(types.InlineKeyboardButton("▶️ فعال کردن دوباره", callback_data=f"resresume:{service_id}"))
+    kb.add(types.InlineKeyboardButton("🗑 حذف سرویس", callback_data=f"resdel_ask:{service_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=back_cb))
+
+    text = (
+        f"👤 <b>{svc['username']}</b>\n\n"
+        f"وضعیت: {status_label}\n"
+        f"⏳ زمان باقی‌مانده: {days_text}\n"
+        f"📱 دستگاه مجاز: {svc['devices']}\n\n"
+        f"📊 <b>حجم مصرفی</b>\n"
+        f"{_progress_bar(used, total)}\n"
+        f"مصرف‌شده: {_fmt_gb(used)} GB از {_fmt_gb(total)} GB\n"
+        f"باقیمونده: {_fmt_gb(remaining)} GB\n\n"
+        f"🔗 لینک اشتراک:\n<code>{svc['config'] or '---'}</code>"
+    )
+    render(chat_id, text, kb, message_id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rescust:"))
 def rescust_detail(call):
-    service_id = int(call.data.split(":")[1])
+    parts = call.data.split(":", 2)
+    service_id = int(parts[1])
+    back_cb = parts[2] if len(parts) > 2 else "res_customers"
+    user_id = internal_user_id(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rescustrefresh:"))
+def rescust_refresh(call):
+    _, service_id, back_cb = call.data.split(":", 2)
+    service_id = int(service_id)
     user_id = internal_user_id(call.from_user.id)
 
     svc = db_execute(
-        "SELECT * FROM services WHERE id=? AND reseller_id=?",
+        "SELECT id FROM services WHERE id=? AND reseller_id=?",
         (service_id, user_id), fetchone=True
     )
     if not svc:
         bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
         return
 
-    bot.answer_callback_query(call.id)
-
-    total_used = db_execute(
-        "SELECT COALESCE(SUM(amount_gb),0) t FROM reseller_usage_log WHERE service_id=?",
-        (service_id,), fetchone=True
-    )["t"]
-
-    status_label = "🟢 فعال" if svc["status"] == "active" else "🔴 غیرفعال"
-
-    kb = types.InlineKeyboardMarkup()
-    if svc["status"] == "active":
-        kb.add(types.InlineKeyboardButton("⏸ غیرفعال کردن دستی", callback_data=f"respause:{service_id}"))
-    else:
-        kb.add(types.InlineKeyboardButton("▶️ فعال کردن دوباره", callback_data=f"resresume:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🗑 حذف سرویس", callback_data=f"resdel_ask:{service_id}"))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="res_customers"))
-
-    render(
-        call.message.chat.id,
-        f"👤 <b>{svc['username']}</b>\n\n"
-        f"وضعیت: {status_label}\n"
-        f"📊 مجموع مصرف ثبت‌شده: {_fmt_gb(total_used)} گیگ\n"
-        f"📅 ساخته‌شده: {svc['created_at']}\n\n"
-        f"🔗 لینک اشتراک:\n<code>{svc['config'] or '---'}</code>",
-        kb,
-        call.message.message_id
-    )
+    bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی...")
+    try:
+        reseller_billing.refresh_service(service_id)
+    except Exception:
+        pass
+    _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
 
 
 def _svc_panel(svc):
