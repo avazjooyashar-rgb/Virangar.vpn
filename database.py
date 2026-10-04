@@ -350,6 +350,15 @@ def init_db():
             ADD COLUMN reseller_plan_id INTEGER
             """)
 
+        # مقدار واقعیِ گیگی که تو همین خرید گرفته شده (چون با تیرهای
+        # حجمی/حجم دلخواه، دیگه یه عدد ثابت رو خودِ پلن نیست)
+        if "reseller_volume_gb" not in payment_columns:
+
+            cur.execute("""
+            ALTER TABLE payments
+            ADD COLUMN reseller_volume_gb REAL
+            """)
+
         # ====================================================
         # TRANSACTIONS
         # ====================================================
@@ -407,6 +416,43 @@ def init_db():
             ALTER TABLE reseller_plans
             ADD COLUMN volume_gb INTEGER DEFAULT 0
             """)
+
+        # قیمت هر گیگ برای خرید «حجم دلخواه» (۰ یعنی این پلن حجم دلخواه نداره)
+        if "price_per_gb" not in reseller_plan_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_plans
+            ADD COLUMN price_per_gb INTEGER DEFAULT 0
+            """)
+
+        # حداقل مجاز برای خرید حجم دلخواه (مثلاً نذاره زیر ۳۰۰ گیگ بخره)
+        if "custom_min_gb" not in reseller_plan_columns:
+
+            cur.execute("""
+            ALTER TABLE reseller_plans
+            ADD COLUMN custom_min_gb INTEGER DEFAULT 300
+            """)
+
+        # ====================================================
+        # RESELLER PLAN TIERS
+        # گزینه‌های آماده‌ی حجم زیر هر پلن نمایندگی (مثلاً ۷۵۰ / ۱۰۰۰ /
+        # ۲۰۰۰ گیگ، هرکدوم با قیمت خودش)، جدا از گزینه‌ی «حجم دلخواه»
+        # ====================================================
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS reseller_plan_tiers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            volume_gb INTEGER NOT NULL,
+            price INTEGER NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT,
+
+            FOREIGN KEY(plan_id)
+                REFERENCES reseller_plans(id)
+                ON DELETE CASCADE
+        )
+        """)
 
         # ====================================================
         # RESELLER PANELS
