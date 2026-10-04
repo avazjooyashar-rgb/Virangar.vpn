@@ -102,7 +102,7 @@ def render_plan_list(chat_id, message_id=None):
     for p in plans:
         icon = "🟢" if p["active"] else "🔴"
         kb.add(types.InlineKeyboardButton(
-            f"{icon} {p['name']} | {_fmt_gb(p['volume_gb'])}GB | {p['price']:,}",
+            f"{icon} {p['name']} | {p['panel_name'] or '---'}",
             callback_data=f"ares:plan:{p['id']}"
         ))
     kb.add(types.InlineKeyboardButton("➕ افزودن پلن جدید", callback_data="ares:plan_new"))
@@ -124,6 +124,13 @@ def cb_ares_plans(call):
 # PLAN DETAIL / EDIT
 # ============================================================
 
+def _plan_tiers(plan_id):
+    return db_execute(
+        "SELECT * FROM reseller_plan_tiers WHERE plan_id=? ORDER BY sort_order, volume_gb",
+        (plan_id,), fetchall=True
+    ) or []
+
+
 def render_plan_detail(chat_id, plan_id, message_id=None):
     p = db_execute("""
     SELECT reseller_plans.*, panels.name AS panel_name
@@ -136,29 +143,207 @@ def render_plan_detail(chat_id, plan_id, message_id=None):
         render(chat_id, "❌ این پلن دیگه وجود نداره.", _back_markup("ares:plans"), message_id)
         return
 
+    tiers = _plan_tiers(plan_id)
+    custom_on = bool(p["price_per_gb"] and p["price_per_gb"] > 0)
+
     kb = types.InlineKeyboardMarkup()
-    kb.row(
-        types.InlineKeyboardButton("✏️ نام", callback_data=f"ares:pedit:name:{plan_id}"),
-        types.InlineKeyboardButton("✏️ حجم", callback_data=f"ares:pedit:volume:{plan_id}"),
-        types.InlineKeyboardButton("✏️ قیمت", callback_data=f"ares:pedit:price:{plan_id}"),
-    )
+    kb.add(types.InlineKeyboardButton("✏️ نام", callback_data=f"ares:pedit:name:{plan_id}"))
     kb.add(types.InlineKeyboardButton("🔁 تغییر پنل", callback_data=f"ares:pedit:panel:{plan_id}"))
+
+    for t in tiers:
+        kb.row(
+            types.InlineKeyboardButton(
+                f"📦 {_fmt_gb(t['volume_gb'])}GB — {t['price']:,} تومان",
+                callback_data=f"ares:tier_noop:{t['id']}"
+            ),
+            types.InlineKeyboardButton("🗑", callback_data=f"ares:tier_del_ask:{t['id']}:{plan_id}"),
+        )
+    kb.add(types.InlineKeyboardButton("➕ افزودن حجم آماده", callback_data=f"ares:tier_new:{plan_id}"))
+
+    custom_label = (
+        f"💬 حجم دلخواه: فعال ({p['price_per_gb']:,} ت/گیگ، حداقل {_fmt_gb(p['custom_min_gb'] or 300)}GB)"
+        if custom_on else "💬 حجم دلخواه: غیرفعال"
+    )
+    kb.add(types.InlineKeyboardButton(custom_label, callback_data=f"ares:custom_set:{plan_id}"))
+    if custom_on:
+        kb.add(types.InlineKeyboardButton("🚫 غیرفعال کردن حجم دلخواه", callback_data=f"ares:custom_off:{plan_id}"))
+
     kb.add(types.InlineKeyboardButton(
-        "🔴 غیرفعال کردن" if p["active"] else "🟢 فعال کردن",
+        "🔴 غیرفعال کردن کل پلن" if p["active"] else "🟢 فعال کردن کل پلن",
         callback_data=f"ares:ptoggle:{plan_id}"
     ))
     kb.add(types.InlineKeyboardButton("🗑 حذف پلن", callback_data=f"ares:pdel_ask:{plan_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="ares:plans"))
 
-    text = (
-        f"💎 <b>{p['name']}</b>\n\n"
-        f"وضعیت: {'🟢 فعال' if p['active'] else '🔴 غیرفعال'}\n"
-        f"🖥 پنل: {p['panel_name'] or '---'}\n"
-        f"📊 حجم: {_fmt_gb(p['volume_gb'])} GB\n"
-        f"💰 قیمت: {p['price']:,} تومان\n"
-        "⏳ بدون محدودیت زمانی"
+    lines = [
+        f"💎 <b>{p['name']}</b>\n",
+        f"وضعیت: {'🟢 فعال' if p['active'] else '🔴 غیرفعال'}",
+        f"🖥 پنل: {p['panel_name'] or '---'}",
+        "⏳ بدون محدودیت زمانی\n",
+    ]
+    if not tiers and not custom_on:
+        lines.append("⚠️ هنوز هیچ گزینه‌ی خریدی (حجم آماده یا دلخواه) نداره؛ نماینده چیزی برای انتخاب نمی‌بینه.")
+    else:
+        lines.append(f"📦 {len(tiers)} گزینه‌ی حجم آماده تعریف شده.")
+        lines.append("💬 حجم دلخواه " + ("فعاله." if custom_on else "غیرفعاله."))
+
+    render(chat_id, "\n".join(lines), kb, message_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_noop:"))
+@admin_only_call
+def cb_ares_tier_noop(call):
+    bot.answer_callback_query(call.id, "برای حذف، روی 🗑 کنارش بزن.")
+
+
+# ---------------- ADD TIER ----------------
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_new:"))
+@admin_only_call
+def cb_ares_tier_new(call):
+    plan_id = int(call.data.split(":")[2])
+    chat_id = call.message.chat.id
+    _state[chat_id] = {"flow": "tier_new", "plan_id": plan_id, "data": {}}
+    render(chat_id, "📊 حجم این گزینه رو به گیگابایت بفرست (فقط عدد، مثلاً 750):",
+           _back_markup(f"ares:plan:{plan_id}"), call.message.message_id)
+    bot.answer_callback_query(call.id)
+    bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_volume)
+
+
+def _tier_new_volume(message):
+    chat_id = message.chat.id
+    cc.drop(message)
+    st = _state.get(chat_id)
+    if not st or st.get("flow") != "tier_new":
+        return
+    screen_id = cc.get_screen(chat_id, "admin_menu")
+    plan_id = st["plan_id"]
+    try:
+        value = float((message.text or "").strip().replace(",", "."))
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
+        bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_volume)
+        return
+    st["data"]["volume_gb"] = value
+    render(chat_id, "💰 قیمت این گزینه رو به تومان بفرست (فقط عدد):", _back_markup(f"ares:plan:{plan_id}"), screen_id)
+    bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_price)
+
+
+def _tier_new_price(message):
+    chat_id = message.chat.id
+    cc.drop(message)
+    st = _state.get(chat_id)
+    if not st or st.get("flow") != "tier_new":
+        return
+    screen_id = cc.get_screen(chat_id, "admin_menu")
+    plan_id = st["plan_id"]
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
+        bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_price)
+        return
+
+    db_execute("""
+    INSERT INTO reseller_plan_tiers (plan_id, volume_gb, price, sort_order, created_at)
+    VALUES (?, ?, ?, 0, ?)
+    """, (plan_id, st["data"]["volume_gb"], int(text), now()))
+
+    _state.pop(chat_id, None)
+    render_plan_detail(chat_id, plan_id, screen_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_del_ask:"))
+@admin_only_call
+def cb_ares_tier_del_ask(call):
+    _, _, tier_id, plan_id = call.data.split(":")
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("✅ بله", callback_data=f"ares:tier_del_go:{tier_id}:{plan_id}"),
+        types.InlineKeyboardButton("❌ نه", callback_data=f"ares:plan:{plan_id}")
     )
-    render(chat_id, text, kb, message_id)
+    render(call.message.chat.id, "این گزینه‌ی حجم حذف بشه؟", kb, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_del_go:"))
+@admin_only_call
+def cb_ares_tier_del_go(call):
+    _, _, tier_id, plan_id = call.data.split(":")
+    db_execute("DELETE FROM reseller_plan_tiers WHERE id=?", (int(tier_id),))
+    bot.answer_callback_query(call.id, "🗑 حذف شد.")
+    render_plan_detail(call.message.chat.id, int(plan_id), call.message.message_id)
+
+
+# ---------------- CUSTOM VOLUME (price per GB + minimum) ----------------
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:custom_off:"))
+@admin_only_call
+def cb_ares_custom_off(call):
+    plan_id = int(call.data.split(":")[2])
+    db_execute("UPDATE reseller_plans SET price_per_gb=0 WHERE id=?", (plan_id,))
+    bot.answer_callback_query(call.id, "✅ حجم دلخواه غیرفعال شد.")
+    render_plan_detail(call.message.chat.id, plan_id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:custom_set:"))
+@admin_only_call
+def cb_ares_custom_set(call):
+    plan_id = int(call.data.split(":")[2])
+    chat_id = call.message.chat.id
+    _state[chat_id] = {"flow": "custom_set", "plan_id": plan_id, "data": {}}
+    render(
+        chat_id,
+        "💬 برای «حجم دلخواه»، قیمت هر گیگ رو به تومان بفرست (فقط عدد):",
+        _back_markup(f"ares:plan:{plan_id}"), call.message.message_id
+    )
+    bot.answer_callback_query(call.id)
+    bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_price)
+
+
+def _custom_set_price(message):
+    chat_id = message.chat.id
+    cc.drop(message)
+    st = _state.get(chat_id)
+    if not st or st.get("flow") != "custom_set":
+        return
+    screen_id = cc.get_screen(chat_id, "admin_menu")
+    plan_id = st["plan_id"]
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
+        bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_price)
+        return
+    st["data"]["price_per_gb"] = int(text)
+    render(
+        chat_id,
+        "📏 حداقل حجم مجاز برای خرید دلخواه رو به گیگ بفرست (مثلاً 300):",
+        _back_markup(f"ares:plan:{plan_id}"), screen_id
+    )
+    bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_min)
+
+
+def _custom_set_min(message):
+    chat_id = message.chat.id
+    cc.drop(message)
+    st = _state.get(chat_id)
+    if not st or st.get("flow") != "custom_set":
+        return
+    screen_id = cc.get_screen(chat_id, "admin_menu")
+    plan_id = st["plan_id"]
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
+        bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_min)
+        return
+
+    db_execute(
+        "UPDATE reseller_plans SET price_per_gb=?, custom_min_gb=? WHERE id=?",
+        (st["data"]["price_per_gb"], int(text), plan_id)
+    )
+    _state.pop(chat_id, None)
+    render_plan_detail(chat_id, plan_id, screen_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:plan:"))
@@ -213,8 +398,6 @@ def cb_ares_pdel_go(call):
 
 _FIELD_PROMPTS = {
     "name": "✏️ اسم جدید پلن رو بفرست:",
-    "volume": "📊 حجم جدید رو به گیگابایت بفرست (فقط عدد):",
-    "price": "💰 قیمت جدید رو به تومان بفرست (فقط عدد):",
 }
 
 
@@ -242,24 +425,6 @@ def _pedit_save(message, field, plan_id):
             bot.register_next_step_handler_by_chat_id(chat_id, _pedit_save, field, plan_id)
             return
         db_execute("UPDATE reseller_plans SET name=? WHERE id=?", (text[:60], plan_id))
-
-    elif field == "volume":
-        try:
-            value = float(text.replace(",", "."))
-            if value <= 0:
-                raise ValueError
-        except ValueError:
-            render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
-            bot.register_next_step_handler_by_chat_id(chat_id, _pedit_save, field, plan_id)
-            return
-        db_execute("UPDATE reseller_plans SET volume_gb=? WHERE id=?", (value, plan_id))
-
-    elif field == "price":
-        if not text.isdigit() or int(text) <= 0:
-            render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup(f"ares:plan:{plan_id}"), screen_id)
-            bot.register_next_step_handler_by_chat_id(chat_id, _pedit_save, field, plan_id)
-            return
-        db_execute("UPDATE reseller_plans SET price=? WHERE id=?", (int(text), plan_id))
 
     render_plan_detail(chat_id, plan_id, screen_id)
 
@@ -342,56 +507,28 @@ def cb_ares_pnpanel(call):
         bot.answer_callback_query(call.id, "⛔ این مرحله منقضی شده.", show_alert=True)
         return
     panel_id = int(call.data.split(":")[2])
-    st["data"]["panel_id"] = panel_id
-
-    render(chat_id, "📊 حجم این پلن رو به گیگابایت بفرست (فقط عدد، مثلاً 500):", _back_markup("ares:plans"), call.message.message_id)
-    bot.answer_callback_query(call.id)
-    bot.register_next_step_handler_by_chat_id(chat_id, _new_plan_volume)
-
-
-def _new_plan_volume(message):
-    chat_id = message.chat.id
-    cc.drop(message)
-    st = _check_new_flow(chat_id)
-    if not st:
-        return
-    screen_id = cc.get_screen(chat_id, "admin_menu")
-    try:
-        value = float((message.text or "").strip().replace(",", "."))
-        if value <= 0:
-            raise ValueError
-    except ValueError:
-        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup("ares:plans"), screen_id)
-        bot.register_next_step_handler_by_chat_id(chat_id, _new_plan_volume)
-        return
-
-    st["data"]["volume_gb"] = value
-    render(chat_id, "💰 قیمت این پلن رو به تومان بفرست (فقط عدد):", _back_markup("ares:plans"), screen_id)
-    bot.register_next_step_handler_by_chat_id(chat_id, _new_plan_price)
-
-
-def _new_plan_price(message):
-    chat_id = message.chat.id
-    cc.drop(message)
-    st = _check_new_flow(chat_id)
-    if not st:
-        return
-    screen_id = cc.get_screen(chat_id, "admin_menu")
-    text = (message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        render(chat_id, "❌ فقط عدد بزرگ‌تر از صفر بفرست:", _back_markup("ares:plans"), screen_id)
-        bot.register_next_step_handler_by_chat_id(chat_id, _new_plan_price)
-        return
-
     data = st["data"]
-    db_execute("""
+
+    new_id = db_execute("""
     INSERT INTO reseller_plans
     (name, price, capacity, duration, active, panel_id, volume_gb, created_at)
-    VALUES (?, ?, 0, 0, 1, ?, ?, ?)
-    """, (data["name"], int(text), data["panel_id"], data["volume_gb"], now()))
+    VALUES (?, 0, 0, 0, 1, ?, 0, ?)
+    """, (data["name"], panel_id, now()), return_lastrowid=True)
 
     _state.pop(chat_id, None)
-    render_plan_list(chat_id, screen_id)
+    bot.answer_callback_query(call.id, "✅ پلن ساخته شد؛ حالا حجم‌هاش رو اضافه کن.")
+
+    if new_id:
+        render_plan_detail(chat_id, new_id, call.message.message_id)
+    else:
+        row = db_execute(
+            "SELECT id FROM reseller_plans WHERE name=? AND panel_id=? ORDER BY id DESC LIMIT 1",
+            (data["name"], panel_id), fetchone=True
+        )
+        if row:
+            render_plan_detail(chat_id, row["id"], call.message.message_id)
+        else:
+            render_plan_list(chat_id, call.message.message_id)
 
 
 # ============================================================
