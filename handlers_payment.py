@@ -1,8 +1,24 @@
 # ============================================================
-# handlers_payment.py
+# handlers_payment.py  [نسخه‌ی اصلاح‌شده]
 # پرداخت کارت به کارت، کیف پول، آنلاین، تأیید/رد توسط مدیر
 # + پنل «مدیریت پرداخت‌ها» (لیست + صفحه‌بندی) به‌جای اسپم پیام
+#
+# تغییرات این نسخه:
+#   - صفحه‌ی کارت به کارت روی همون پیام ادیت میشه و مهلت ۱۵ دقیقه‌ای
+#     برای ارسال رسید داره؛ بعد از اون دکمه‌ی «شروع دوباره» میاد
+#   - بعد از ثبت رسید، دکمه‌ی «منوی اصلی» برای کاربر هست
+#   - بعد از تأیید (کارت به کارت و کیف پول): یک پیام واحد که بالاش
+#     QR کد و پایینش لینک اشتراکه
+#   - بعد از رد پرداخت: دکمه‌ی «خرید دوباره / منوی اصلی» برای کاربر
+#
+# نیازمندی: pip install "qrcode[pil]"  (برای نمایندگی هم لازمه)
 # ============================================================
+import io
+import threading
+import traceback
+import uuid
+from html import escape as _esc
+
 from telebot import types
 from config import bot, SUPER_ADMIN_ID
 from database import db_execute, get_setting, now
@@ -14,7 +30,17 @@ from keyboards import admin_keyboard, user_keyboard
 from datetime import datetime
 import chat_clean as cc
 
+try:
+    import qrcode
+except ImportError:  # اگه نصب نبود، لینک فقط به‌صورت متن فرستاده میشه
+    qrcode = None
+
 PAGE_SIZE = 5  # تعداد پرداخت در هر صفحه لیست مدیریت
+RECEIPT_TIMEOUT_SECONDS = 15 * 60  # مهلت ارسال رسید کارت به کارت
+
+# chat_id -> {"token", "message_id", "timer", "plan_id", "username"}
+_receipt_wait = {}
+_wait_lock = threading.Lock()
 
 
 # ============================================================
@@ -87,9 +113,168 @@ def _duplicate_receipt_warning(payment):
     return None
 
 
+def _edit(chat_id, message_id, text, kb):
+    """پیام رو ادیت می‌کنه؛ اگه نشد پیام جدید می‌فرسته. شناسه‌ی پیام نهایی رو برمی‌گردونه."""
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text, chat_id, message_id,
+                reply_markup=kb, parse_mode="HTML"
+            )
+            return message_id
+        except Exception as e:
+            if "message is not modified" in str(e):
+                return message_id
+    sent = cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    return sent.message_id if sent else None
+
+
+def _home_kb(extra_buttons=None):
+    """کیبورد شیشه‌ای با دکمه‌ی منوی اصلی (و دکمه‌های اضافه‌ی بالاش)."""
+    kb = types.InlineKeyboardMarkup()
+    for text, cb in (extra_buttons or []):
+        kb.add(types.InlineKeyboardButton(text, callback_data=cb))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    return kb
+
+
+def _qr_bio(link):
+    if not qrcode or not link:
+        return None
+    try:
+        img = qrcode.make(link)
+        bio = io.BytesIO()
+        img.save(bio, format="PNG")
+        bio.seek(0)
+        return bio
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def send_service_delivery(chat_id, title, plan, config):
+    """
+    تحویل سرویس به کاربر: یک پیام واحد که بالاش QR کد و پایینش لینک اشتراکه.
+    (عکسِ QR با کپشن؛ اگه کپشن از حد تلگرام بلندتر بشه، QR و بعدش متن جدا
+    فرستاده میشه، همچنان QR بالا و لینک پایین.)
+    """
+    link = config or ""
+    caption = (
+        f"{title}\n\n"
+        "🛡 سرویس شما با موفقیت ساخته شد.\n\n"
+        f"📦 پلن: {plan['name']}\n"
+        f"⏳ مدت: {plan['duration']} روز\n"
+        f"📊 حجم: {plan['volume']} GB\n\n"
+        "🔗 لینک اشتراک:\n"
+        f"<code>{_esc(link) if link else '---'}</code>"
+    )
+    kb = _home_kb()
+
+    bio = _qr_bio(link)
+    if bio:
+        try:
+            if len(caption) <= 1000:
+                bot.send_photo(
+                    chat_id, bio, caption=caption,
+                    parse_mode="HTML", reply_markup=kb
+                )
+                return
+            bot.send_photo(chat_id, bio, caption="📱 QR کد اشتراک")
+        except Exception:
+            traceback.print_exc()
+
+    bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=kb)
+
+
+# ============================================================
+# مهلت ۱۵ دقیقه‌ای ارسال رسید
+# ============================================================
+def _cancel_receipt_wait(chat_id):
+    with _wait_lock:
+        wait = _receipt_wait.pop(chat_id, None)
+    if wait and wait.get("timer"):
+        wait["timer"].cancel()
+    return wait
+
+
+def _our_step_pending(chat_id):
+    """
+    چک می‌کنه هنوز منتظر رسید همین مرحله هستیم یا کاربر رفته جای دیگه
+    (اگه نتونیم تشخیص بدیم، True برمی‌گردونه تا مهلت اعمال بشه).
+    """
+    try:
+        handlers = bot.next_step_backend.handlers.get(chat_id) or []
+    except Exception:
+        return True
+    for h in handlers:
+        cb = getattr(h, "callback", None)
+        if cb is None and isinstance(h, dict):
+            cb = h.get("callback")
+        if cb is None:
+            return True
+        if cb is receive_plan_receipt:
+            return True
+    return False
+
+
+def _expire_receipt_wait(chat_id, token):
+    with _wait_lock:
+        wait = _receipt_wait.get(chat_id)
+        if not wait or wait["token"] != token:
+            return
+        _receipt_wait.pop(chat_id, None)
+
+    # کاربر مرحله رو ترک کرده؛ به صفحه‌ی فعلیش دست نمی‌زنیم
+    if not _our_step_pending(chat_id):
+        return
+
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔄 شروع دوباره", callback_data="buy_back_home"))
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    text = (
+        "⏰ <b>مهلت ارسال رسید تموم شد</b>\n\n"
+        "برای ادامه‌ی خرید باید مراحل رو از اول شروع کنی."
+    )
+    try:
+        bot.edit_message_text(
+            text, chat_id, wait["message_id"],
+            reply_markup=kb, parse_mode="HTML"
+        )
+    except Exception:
+        try:
+            bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            traceback.print_exc()
+
+
 # ============================================================
 # MANUAL PAYMENT (plan purchase) - card to card
 # ============================================================
+def _receipt_screen_text(plan, error=None):
+    card = get_setting("card_number", "")
+    holder = get_setting("card_holder", "")
+    text = ""
+    if error:
+        text += f"{error}\n\n"
+    text += (
+        "💳 <b>پرداخت کارت به کارت</b>\n\n"
+        f"💰 مبلغ: <b>{plan['price']:,} تومان</b>\n\n"
+        f"💳 شماره کارت:\n<code>{card}</code>\n\n"
+        f"👤 به نام: <b>{holder or '---'}</b>\n\n"
+        "📸 بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید.\n"
+        "⏰ مهلت ارسال رسید: <b>۱۵ دقیقه</b>"
+    )
+    return text
+
+
+def _receipt_cancel_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="paycancel"))
+    return kb
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("manual:"))
 def manual_payment(call):
     parts = call.data.split(":", 2)
@@ -105,7 +290,6 @@ def manual_payment(call):
         bot.answer_callback_query(call.id, "پلن پیدا نشد", show_alert=True)
         return
     card = get_setting("card_number", "")
-    holder = get_setting("card_holder", "")
     if not card:
         bot.answer_callback_query(
             call.id,
@@ -113,37 +297,94 @@ def manual_payment(call):
             show_alert=True
         )
         return
-    text = (
-        "💳 <b>پرداخت کارت به کارت</b>\n\n"
-        f"💰 مبلغ: <b>{plan['price']:,} تومان</b>\n\n"
-        f"💳 شماره کارت:\n<code>{card}</code>\n\n"
-        f"👤 به نام: <b>{holder or '---'}</b>\n\n"
-        "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
-    )
+
     bot.answer_callback_query(call.id)
-    cc.safe_delete(call.message.chat.id, call.message.message_id)  # صفحه‌ی روش پرداخت پاک بشه
-    cc.show(call.message.chat.id, text, parse_mode="HTML")
-    bot.register_next_step_handler(
-        call.message,
-        receive_plan_receipt,
-        plan_id,
-        username
+    chat_id = call.message.chat.id
+
+    # هر انتظار قبلی (اگه بود) لغو بشه
+    _cancel_receipt_wait(chat_id)
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    # همون پیام روش پرداخت به صفحه‌ی کارت به کارت تبدیل میشه
+    message_id = _edit(
+        chat_id, call.message.message_id,
+        _receipt_screen_text(plan), _receipt_cancel_kb()
     )
+
+    token = uuid.uuid4().hex
+    timer = threading.Timer(
+        RECEIPT_TIMEOUT_SECONDS, _expire_receipt_wait, args=(chat_id, token)
+    )
+    timer.daemon = True
+    with _wait_lock:
+        _receipt_wait[chat_id] = {
+            "token": token,
+            "message_id": message_id,
+            "timer": timer,
+            "plan_id": plan_id,
+            "username": username,
+        }
+    timer.start()
+
+    bot.register_next_step_handler_by_chat_id(
+        chat_id, receive_plan_receipt, plan_id, username
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "paycancel")
+def payment_cancel(call):
+    """بازگشت از صفحه‌ی ارسال رسید به انتخاب روش پرداخت."""
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    wait = _cancel_receipt_wait(chat_id)
+    bot.clear_step_handler_by_chat_id(chat_id)
+
+    from handlers_shop import show_payment_methods, show_panels
+
+    plan = None
+    if wait and wait.get("plan_id"):
+        plan = db_execute(
+            "SELECT * FROM plans WHERE id=? AND active=1",
+            (wait["plan_id"],), fetchone=True
+        )
+    if plan and wait.get("username"):
+        show_payment_methods(
+            chat_id, call.from_user.id, plan, wait["username"],
+            call.message.message_id
+        )
+    else:
+        show_panels(chat_id, call.message.message_id)
 
 
 def receive_plan_receipt(message, plan_id, username):
-    cc.drop(message)                       # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
-    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
+    chat_id = message.chat.id
+    cc.drop(message)  # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
 
-    if not message.photo:
-        sent = cc.show(message.chat.id, "❌  لطفاً تصویر رسید را ارسال کن.", key="err")
-        bot.register_next_step_handler(sent, receive_plan_receipt, plan_id, username)
-        return
-    file_id = message.photo[-1].file_id
-    user_id = internal_user_id(message.from_user.id)
+    wait = _receipt_wait.get(chat_id)
+    screen_id = wait["message_id"] if wait else cc.get_screen(chat_id)
+
     plan = db_execute("SELECT * FROM plans WHERE id=?", (plan_id,), fetchone=True)
     if not plan:
+        _cancel_receipt_wait(chat_id)
+        _edit(chat_id, screen_id, "❌ این پلن دیگر موجود نیست.", _home_kb())
         return
+
+    if not message.photo:
+        _edit(
+            chat_id, screen_id,
+            _receipt_screen_text(plan, error="❌ <b>لطفاً تصویر رسید را ارسال کن.</b>"),
+            _receipt_cancel_kb()
+        )
+        bot.register_next_step_handler_by_chat_id(
+            chat_id, receive_plan_receipt, plan_id, username
+        )
+        return
+
+    # رسید رسید؛ تایمر لغو بشه
+    _cancel_receipt_wait(chat_id)
+
+    file_id = message.photo[-1].file_id
+    user_id = internal_user_id(message.from_user.id)
     db_execute("""
     INSERT INTO payments
     (user_id, plan_id, amount, method,
@@ -157,10 +398,11 @@ def receive_plan_receipt(message, plan_id, username):
     ))
     # دیگه پیام خودکار به ادمین ارسال نمی‌شود؛ فقط در دیتابیس pending می‌ماند
     # و از طریق «مدیریت پرداخت‌ها» قابل مشاهده و بررسی است.
-    cc.show(
-        message.chat.id,
-        "✅  رسید شما ثبت شد.\n\n"
-        "⏳  پرداخت در انتظار بررسی مدیریت است."
+    _edit(
+        chat_id, screen_id,
+        "✅ <b>رسید شما ثبت شد.</b>\n\n"
+        "⏳ پرداخت در انتظار بررسی مدیریت است. بعد از تأیید، سرویس برات ارسال میشه.",
+        _home_kb()
     )
 
 
@@ -256,20 +498,15 @@ def wallet_payment(call):
         user["id"], plan_id, plan["price"], username, service["id"], now(), now()
     ))
 
-    # صفحه‌ی روش پرداخت پاک میشه؛ پیام موفقیت (شامل لینک اشتراک) عمداً
-    # ثبت/پاک نمیشه تا کاربر لینکش رو از دست نده.
+    # صفحه‌ی روش پرداخت پاک میشه؛ پیام تحویل سرویس (QR + لینک اشتراک)
+    # عمداً ثبت/پاک نمیشه تا کاربر لینکش رو از دست نده.
     cc.drop_screen(call.message.chat.id)
     cc.safe_delete(call.message.chat.id, call.message.message_id)
-    bot.send_message(
+    send_service_delivery(
         call.message.chat.id,
-        "🎉 <b>پرداخت با موفقیت انجام شد!</b>\n\n"
-        "🛡 سرویس شما با موفقیت ساخته شد.\n\n"
-        f"📦 پلن: {plan['name']}\n"
-        f"⏳  مدت: {plan['duration']} روز\n"
-        f"📊 حجم: {plan['volume']} GB\n\n"
-        f"🔗 لینک اشتراک:\n"
-        f"<code>{service['config']}</code>",
-        parse_mode="HTML"
+        "🎉 <b>پرداخت با موفقیت انجام شد!</b>",
+        plan,
+        service["config"]
     )
 
 
@@ -610,7 +847,8 @@ def approve_payment(call):
                 f"✅  پرداخت تأیید شد.\n\n"
                 f"💰 مبلغ <b>{payment['amount']:,}</b> تومان "
                 f"به کیف پول شما اضافه شد.",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=_home_kb()
             )
         bot.answer_callback_query(call.id, "کیف پول شارژ شد ✅ ")
         payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
@@ -659,16 +897,13 @@ def approve_payment(call):
     SET status='approved', service_id=?, updated_at=?
     WHERE id=?
     """, (service["id"], now(), payment_id))
-    bot.send_message(
+
+    # تحویل سرویس: یک پیام واحد (QR بالا، لینک اشتراک پایین) + دکمه‌ی منوی اصلی
+    send_service_delivery(
         user["telegram_id"],
-        "🎉 <b>پرداخت شما تأیید شد!</b>\n\n"
-        "🛡 سرویس شما با موفقیت ساخته شد.\n\n"
-        f"📦 پلن: {plan['name']}\n"
-        f"⏳  مدت: {plan['duration']} روز\n"
-        f"📊 حجم: {plan['volume']} GB\n\n"
-        f"🔗 لینک اشتراک:\n"
-        f"<code>{service['config']}</code>",
-        parse_mode="HTML"
+        "🎉 <b>پرداخت شما تأیید شد!</b>",
+        plan,
+        service["config"]
     )
     bot.answer_callback_query(call.id, "پرداخت و سرویس تأیید شد ✅")
     payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
@@ -677,6 +912,18 @@ def approve_payment(call):
 # ============================================================
 # REJECT
 # ============================================================
+def _reject_buttons(payment):
+    """دکمه‌های پیام ردشدن بر اساس نوع پرداخت."""
+    payment_type = payment["type"] if "type" in payment.keys() else "purchase"
+    if payment["method"] == "wallet" or payment_type == "wallet":
+        return []
+    if payment_type in ("renew", "increase"):
+        return [("🛡 سرویس‌های من", "services_back")]
+    if payment_type == "reseller":
+        return [("🤝 پنل نمایندگی", "res_menu")]
+    return [("🔄 خرید دوباره", "buy_back_home")]
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payreject:"))
 def reject_payment(call):
     if not is_superadmin(call.from_user.id):
@@ -696,9 +943,10 @@ def reject_payment(call):
     if user:
         bot.send_message(
             user["telegram_id"],
-            "❌  رسید پرداخت شما رد شد.\n\n"
+            "❌ <b>رسید پرداخت شما رد شد.</b>\n\n"
             "در صورت اشتباه، دوباره اقدام کنید.",
-            reply_markup=user_keyboard(is_super_admin=is_superadmin(user["telegram_id"]))
+            parse_mode="HTML",
+            reply_markup=_home_kb(_reject_buttons(payment))
         )
     bot.answer_callback_query(call.id, "پرداخت رد شد ❌ ")
     payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
