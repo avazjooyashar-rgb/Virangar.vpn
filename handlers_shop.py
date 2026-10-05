@@ -1,6 +1,12 @@
 # ============================================================
-# handlers_shop.py
+# handlers_shop.py  [نسخه‌ی اصلاح‌شده]
 # نمایش پنل‌ها، پلن‌های هر پنل، جزئیات پلن و سرویس‌های کاربر
+#
+# تغییرات این نسخه (فقط فلوی خرید):
+#   - کل مسیر «پنل → پلن → نام → روش پرداخت» روی یک پیام ادیت
+#     میشه (دیگه پیام حذف/ارسال دوباره نداریم، صفحه نمی‌پره)
+#   - پیام خطای نام هم روی همون صفحه نشون داده میشه
+#   - کیبورد منوی کاربر دست‌نخورده می‌مونه (مخفی نمیشه)
 # ============================================================
 import re
 from datetime import datetime
@@ -15,6 +21,33 @@ from pasarguard_api import pasarguard_get_user_usage, pasarguard_delete_service
 import chat_clean as cc
 
 USERNAME_PREFIX = "virangarvpn."
+
+# chat_id -> message_id صفحه‌ی خرید (برای ادیت روی همون پیام)
+_buy_screen = {}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _screen(chat_id, text, kb, message_id=None):
+    """
+    اگه message_id داشته باشیم همون پیام رو ادیت می‌کنه، وگرنه پیام جدید.
+    شناسه‌ی پیام نهایی رو برمی‌گردونه.
+    """
+    if message_id:
+        try:
+            bot.edit_message_text(
+                text, chat_id, message_id,
+                reply_markup=kb, parse_mode="HTML"
+            )
+            return message_id
+        except Exception as e:
+            if "message is not modified" in str(e):
+                return message_id
+    sent = cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    return sent.message_id if sent else None
+
 
 # ============================================================
 # STEP 1: PANEL LIST — تنها جایی که دکمه «منوی اصلی» دارد
@@ -59,25 +92,35 @@ def buy_vpn(message):
     show_panels(message.chat.id)
 
 
-def show_panels(chat_id):
+def show_panels(chat_id, message_id=None):
     kb, panels = panels_keyboard()
     if not panels:
-        cc.show(chat_id, "❌ در حال حاضر هیچ پنل فعالی با پلن موجود نیست.")
+        _screen(chat_id, "❌ در حال حاضر هیچ پنل فعالی با پلن موجود نیست.",
+                _no_panel_markup(), message_id)
         return
-    cc.show(
+    new_id = _screen(
         chat_id,
         "🖥 <b>انتخاب پنل</b>\n\n"
         "لطفاً یکی از پنل‌های زیر را انتخاب کنید:",
-        reply_markup=kb,
-        parse_mode="HTML"
+        kb,
+        message_id
     )
+    if new_id:
+        _buy_screen[chat_id] = new_id
+
+
+def _no_panel_markup():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+    return kb
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "buy_back_home")
 def buy_back_home(call):
     bot.answer_callback_query(call.id)
-    cc.safe_delete(call.message.chat.id, call.message.message_id)
-    show_panels(call.message.chat.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    # همون پیام به لیست پنل‌ها تبدیل میشه (حذف و ارسال دوباره نداریم)
+    show_panels(call.message.chat.id, call.message.message_id)
 
 
 # ============================================================
@@ -123,29 +166,53 @@ def select_panel(call):
     bot.answer_callback_query(call.id)
 
     if not plans:
-        bot.edit_message_text(
+        new_id = _screen(
+            call.message.chat.id,
             f"<b>{panel['name']}</b>\n\n"
             "❌ برای این پنل هنوز پلنی تعریف نشده.",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=kb,
-            parse_mode="HTML"
+            kb,
+            call.message.message_id
         )
-        return
-
-    bot.edit_message_text(
-        f"پنل: <b>{panel['name']}</b>\n\n"
-        "💎 یکی از پلن‌های زیر را انتخاب کنید:",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    else:
+        new_id = _screen(
+            call.message.chat.id,
+            f"پنل: <b>{panel['name']}</b>\n\n"
+            "💎 یکی از پلن‌های زیر را انتخاب کنید:",
+            kb,
+            call.message.message_id
+        )
+    if new_id:
+        _buy_screen[call.message.chat.id] = new_id
 
 
 # ============================================================
 # STEP 3: PLAN DETAILS -> ASK CUSTOM NAME — فقط «بازگشت»
 # ============================================================
+
+def _plan_prompt_text(plan, error=None):
+    text = (
+        "💎 <b>جزئیات پلن</b>\n\n"
+        f"📦 نام: {plan['name']}\n"
+        f"📊 حجم: {plan['volume']} GB\n"
+        f"⏳ مدت: {plan['duration']} روز\n"
+        f"📱 دستگاه: {plan['devices']}\n"
+        f"💰 قیمت: {plan['price']:,} تومان\n\n"
+    )
+    if error:
+        text += f"{error}\n\n"
+    text += (
+        "🏷 یک نام دلخواه (فقط حروف انگلیسی کوچک و عدد) برای سرویس خود ارسال کنید:\n\n"
+        f"نام نهایی به‌صورت <code>{USERNAME_PREFIX}nameshoma</code> ساخته می‌شود.\n"
+        "مثال: <code>ali</code>"
+    )
+    return text
+
+
+def _plan_prompt_markup(panel_id):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"buypanel:{panel_id}"))
+    return kb
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buyplan:"))
 def select_plan(call):
@@ -159,48 +226,26 @@ def select_plan(call):
         bot.answer_callback_query(call.id, "پلن پیدا نشد", show_alert=True)
         return
 
-    panel_id = plan["panel_id"]
-    text = (
-        "💎 <b>جزئیات پلن</b>\n\n"
-        f"📦 نام: {plan['name']}\n"
-        f"📊 حجم: {plan['volume']} GB\n"
-        f"⏳ مدت: {plan['duration']} روز\n"
-        f"📱 دستگاه: {plan['devices']}\n"
-        f"💰 قیمت: {plan['price']:,} تومان\n\n"
-        "🏷 یک نام دلخواه (فقط حروف انگلیسی کوچک و عدد) برای سرویس خود ارسال کنید:\n\n"
-        f"نام نهایی به‌صورت <code>{USERNAME_PREFIX}nameshoma</code> ساخته می‌شود.\n"
-        "مثال: <code>ali</code>"
-    )
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"buypanel:{panel_id}"))
-
     bot.answer_callback_query(call.id)
-    cc.safe_delete(call.message.chat.id, call.message.message_id)  # لیست پلن‌ها پاک بشه
-    sent = cc.show(
-        call.message.chat.id,
-        text,
-        reply_markup=kb,
-        parse_mode="HTML"
+    chat_id = call.message.chat.id
+
+    # همون پیامِ لیست پلن‌ها به صفحه‌ی جزئیات تبدیل میشه
+    new_id = _screen(
+        chat_id,
+        _plan_prompt_text(plan),
+        _plan_prompt_markup(plan["panel_id"]),
+        call.message.message_id
     )
-    bot.register_next_step_handler(sent, receive_username, plan_id)
+    if new_id:
+        _buy_screen[chat_id] = new_id
+
+    bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
 
 
 def receive_username(message, plan_id):
-    cc.drop(message)                       # نامی که کاربر تایپ کرده پاک بشه
-    cc.drop_screen(message.chat.id, "err")  # پیام خطای قبلی (اگه بود) پاک بشه
-
-    raw = (message.text or "").strip().lower()
-
-    if not re.fullmatch(r"[a-z0-9_]{2,20}", raw):
-        sent = cc.show(
-            message.chat.id,
-            "❌ نام نامعتبر است.\n\n"
-            "فقط از حروف انگلیسی کوچک، عدد و _ استفاده کنید (۲ تا ۲۰ کاراکتر).\n\n"
-            "دوباره ارسال کنید:",
-            key="err"
-        )
-        bot.register_next_step_handler(sent, receive_username, plan_id)
-        return
+    chat_id = message.chat.id
+    cc.drop(message)  # نامی که کاربر تایپ کرده پاک بشه
+    screen_id = _buy_screen.get(chat_id)
 
     plan = db_execute(
         "SELECT * FROM plans WHERE id=? AND active=1",
@@ -208,7 +253,27 @@ def receive_username(message, plan_id):
         fetchone=True
     )
     if not plan:
-        cc.show(message.chat.id, "❌ این پلن دیگر موجود نیست.")
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="buy_back_home"))
+        _screen(chat_id, "❌ این پلن دیگر موجود نیست.", kb, screen_id)
+        return
+
+    kb = _plan_prompt_markup(plan["panel_id"])
+    raw = (message.text or "").strip().lower()
+
+    if not re.fullmatch(r"[a-z0-9_]{2,20}", raw):
+        new_id = _screen(
+            chat_id,
+            _plan_prompt_text(
+                plan,
+                error="❌ <b>نام نامعتبر است.</b> فقط حروف انگلیسی کوچک، عدد و _ "
+                      "(۲ تا ۲۰ کاراکتر). دوباره ارسال کنید:"
+            ),
+            kb, screen_id
+        )
+        if new_id:
+            _buy_screen[chat_id] = new_id
+        bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
         return
 
     username = f"{USERNAME_PREFIX}{raw}"
@@ -225,23 +290,28 @@ def receive_username(message, plan_id):
     )
 
     if existing_service or existing_pending_payment:
-        sent = cc.show(
-            message.chat.id,
-            "❌ این نام قبلاً استفاده شده یا در انتظار تأیید یک پرداخت دیگر است.\n\n"
-            "لطفاً یک نام دیگر انتخاب کنید:",
-            key="err"
+        new_id = _screen(
+            chat_id,
+            _plan_prompt_text(
+                plan,
+                error="❌ <b>این نام قبلاً استفاده شده</b> یا در انتظار تأیید یک "
+                      "پرداخت دیگر است. یک نام دیگر انتخاب کنید:"
+            ),
+            kb, screen_id
         )
-        bot.register_next_step_handler(sent, receive_username, plan_id)
+        if new_id:
+            _buy_screen[chat_id] = new_id
+        bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
         return
 
-    show_payment_methods(message.chat.id, message.from_user.id, plan, username)
+    show_payment_methods(chat_id, message.from_user.id, plan, username, screen_id)
 
 
 # ============================================================
 # STEP 4: PAYMENT METHOD SELECTION — فقط «بازگشت»
 # ============================================================
 
-def show_payment_methods(chat_id, telegram_id, plan, username):
+def show_payment_methods(chat_id, telegram_id, plan, username, message_id=None):
     user = get_user(telegram_id)
     balance = user["balance"] if user else 0
 
@@ -280,7 +350,9 @@ def show_payment_methods(chat_id, telegram_id, plan, username):
             callback_data=f"buypanel:{plan['panel_id']}"
         )
     )
-    cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    new_id = _screen(chat_id, text, kb, message_id or _buy_screen.get(chat_id))
+    if new_id:
+        _buy_screen[chat_id] = new_id
 
 
 # ============================================================
@@ -443,6 +515,7 @@ def services_back(call):
 def go_home(call):
     bot.answer_callback_query(call.id)
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _buy_screen.pop(call.message.chat.id, None)
 
     # اگه این پیام یه «صفحه‌ی منو/مرحله» بود، پایین با نمایش منوی اصلی پاک میشه.
     # اگه پیام دیگه‌ای بود (مثلاً کانفیگ یا رسید)، پاک نمیشه و فقط دکمه‌هاش برداشته میشه.
