@@ -1,11 +1,18 @@
 # ============================================================
-# admin_reseller.py
+# admin_reseller.py  [نسخه‌ی اصلاح‌شده]
 # پنل سوپرادمین برای نمایندگی:
 #   - مدیریت پلن‌های نمایندگی (نام، پنل مبدا، حجم، قیمت)
 #   - لیست نماینده‌ها، استخر هر کدوم، و تنظیم دستی موجودی
-# دکمه‌ی «🤝 نمایندگان» تو کیبورد ادمین از قبل بود ولی هندلر نداشت؛
-# این فایل همون دکمه رو فعال می‌کنه.
+#
+# تغییرات این نسخه:
+#   - هندلر انتخاب پنل (ares:pnpanel) اول به تلگرام جواب میده،
+#     بعد کار دیتابیس رو انجام میده و هر خطا رو تو چت نشون میده
+#   - return_lastrowid حذف شد؛ آیدی پلن با SELECT گرفته میشه
+#   - INSERT فقط روی ستون‌هایی انجام میشه که تو جدول وجود دارن
+#   - حذف پلن، گزینه‌های حجمیِ اون رو هم پاک می‌کنه
 # ============================================================
+
+import traceback
 
 from telebot import types
 
@@ -39,6 +46,19 @@ def _back_markup(cb, label="🔙 بازگشت"):
     m = types.InlineKeyboardMarkup()
     m.add(types.InlineKeyboardButton(label, callback_data=cb))
     return m
+
+
+def _report_error(chat_id, where, exc):
+    """خطا رو تو لاگ سرور چاپ می‌کنه و متنش رو تو چت نشون میده."""
+    traceback.print_exc()
+    try:
+        bot.send_message(
+            chat_id,
+            f"⚠️ خطا ({where}):\n<code>{type(exc).__name__}: {exc}</code>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -81,9 +101,10 @@ def render_main_menu(chat_id, message_id=None):
 @bot.callback_query_handler(func=lambda c: c.data == "ares:menu")
 @admin_only_call
 def cb_ares_menu(call):
-    bot.clear_step_handler_by_chat_id(call.message.chat.id)
-    render_main_menu(call.message.chat.id, call.message.message_id)
     bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _state.pop(call.message.chat.id, None)
+    render_main_menu(call.message.chat.id, call.message.message_id)
 
 
 # ============================================================
@@ -115,9 +136,10 @@ def render_plan_list(chat_id, message_id=None):
 @bot.callback_query_handler(func=lambda c: c.data == "ares:plans")
 @admin_only_call
 def cb_ares_plans(call):
-    bot.clear_step_handler_by_chat_id(call.message.chat.id)
-    render_plan_list(call.message.chat.id, call.message.message_id)
     bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _state.pop(call.message.chat.id, None)
+    render_plan_list(call.message.chat.id, call.message.message_id)
 
 
 # ============================================================
@@ -201,12 +223,13 @@ def cb_ares_tier_noop(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_new:"))
 @admin_only_call
 def cb_ares_tier_new(call):
+    bot.answer_callback_query(call.id)
     plan_id = int(call.data.split(":")[2])
     chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
     _state[chat_id] = {"flow": "tier_new", "plan_id": plan_id, "data": {}}
     render(chat_id, "📊 حجم این گزینه رو به گیگابایت بفرست (فقط عدد، مثلاً 750):",
            _back_markup(f"ares:plan:{plan_id}"), call.message.message_id)
-    bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_volume)
 
 
@@ -245,10 +268,15 @@ def _tier_new_price(message):
         bot.register_next_step_handler_by_chat_id(chat_id, _tier_new_price)
         return
 
-    db_execute("""
-    INSERT INTO reseller_plan_tiers (plan_id, volume_gb, price, sort_order, created_at)
-    VALUES (?, ?, ?, 0, ?)
-    """, (plan_id, st["data"]["volume_gb"], int(text), now()))
+    try:
+        db_execute("""
+        INSERT INTO reseller_plan_tiers (plan_id, volume_gb, price, sort_order, created_at)
+        VALUES (?, ?, ?, 0, ?)
+        """, (plan_id, st["data"]["volume_gb"], int(text), now()))
+    except Exception as e:
+        _state.pop(chat_id, None)
+        _report_error(chat_id, "افزودن حجم آماده", e)
+        return
 
     _state.pop(chat_id, None)
     render_plan_detail(chat_id, plan_id, screen_id)
@@ -257,6 +285,7 @@ def _tier_new_price(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_del_ask:"))
 @admin_only_call
 def cb_ares_tier_del_ask(call):
+    bot.answer_callback_query(call.id)
     _, _, tier_id, plan_id = call.data.split(":")
     kb = types.InlineKeyboardMarkup()
     kb.row(
@@ -264,15 +293,14 @@ def cb_ares_tier_del_ask(call):
         types.InlineKeyboardButton("❌ نه", callback_data=f"ares:plan:{plan_id}")
     )
     render(call.message.chat.id, "این گزینه‌ی حجم حذف بشه؟", kb, call.message.message_id)
-    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:tier_del_go:"))
 @admin_only_call
 def cb_ares_tier_del_go(call):
+    bot.answer_callback_query(call.id, "🗑 حذف شد.")
     _, _, tier_id, plan_id = call.data.split(":")
     db_execute("DELETE FROM reseller_plan_tiers WHERE id=?", (int(tier_id),))
-    bot.answer_callback_query(call.id, "🗑 حذف شد.")
     render_plan_detail(call.message.chat.id, int(plan_id), call.message.message_id)
 
 
@@ -281,24 +309,25 @@ def cb_ares_tier_del_go(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:custom_off:"))
 @admin_only_call
 def cb_ares_custom_off(call):
+    bot.answer_callback_query(call.id, "✅ حجم دلخواه غیرفعال شد.")
     plan_id = int(call.data.split(":")[2])
     db_execute("UPDATE reseller_plans SET price_per_gb=0 WHERE id=?", (plan_id,))
-    bot.answer_callback_query(call.id, "✅ حجم دلخواه غیرفعال شد.")
     render_plan_detail(call.message.chat.id, plan_id, call.message.message_id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:custom_set:"))
 @admin_only_call
 def cb_ares_custom_set(call):
+    bot.answer_callback_query(call.id)
     plan_id = int(call.data.split(":")[2])
     chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
     _state[chat_id] = {"flow": "custom_set", "plan_id": plan_id, "data": {}}
     render(
         chat_id,
         "💬 برای «حجم دلخواه»، قیمت هر گیگ رو به تومان بفرست (فقط عدد):",
         _back_markup(f"ares:plan:{plan_id}"), call.message.message_id
     )
-    bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_price)
 
 
@@ -338,10 +367,16 @@ def _custom_set_min(message):
         bot.register_next_step_handler_by_chat_id(chat_id, _custom_set_min)
         return
 
-    db_execute(
-        "UPDATE reseller_plans SET price_per_gb=?, custom_min_gb=? WHERE id=?",
-        (st["data"]["price_per_gb"], int(text), plan_id)
-    )
+    try:
+        db_execute(
+            "UPDATE reseller_plans SET price_per_gb=?, custom_min_gb=? WHERE id=?",
+            (st["data"]["price_per_gb"], int(text), plan_id)
+        )
+    except Exception as e:
+        _state.pop(chat_id, None)
+        _report_error(chat_id, "حجم دلخواه", e)
+        return
+
     _state.pop(chat_id, None)
     render_plan_detail(chat_id, plan_id, screen_id)
 
@@ -349,10 +384,11 @@ def _custom_set_min(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:plan:"))
 @admin_only_call
 def cb_ares_plan_detail(call):
+    bot.answer_callback_query(call.id)
     plan_id = int(call.data.split(":")[2])
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    _state.pop(call.message.chat.id, None)
     render_plan_detail(call.message.chat.id, plan_id, call.message.message_id)
-    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:ptoggle:"))
@@ -363,14 +399,15 @@ def cb_ares_ptoggle(call):
     if not p:
         bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
         return
+    bot.answer_callback_query(call.id, "✅ تغییر کرد.")
     db_execute("UPDATE reseller_plans SET active=? WHERE id=?", (0 if p["active"] else 1, plan_id))
     render_plan_detail(call.message.chat.id, plan_id, call.message.message_id)
-    bot.answer_callback_query(call.id, "✅ تغییر کرد.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:pdel_ask:"))
 @admin_only_call
 def cb_ares_pdel_ask(call):
+    bot.answer_callback_query(call.id)
     plan_id = int(call.data.split(":")[2])
     kb = types.InlineKeyboardMarkup()
     kb.row(
@@ -382,19 +419,22 @@ def cb_ares_pdel_ask(call):
         "⚠️ حذف پلن فقط جلوی خرید جدید از روش رو می‌گیره؛ استخرهایی که قبلاً از این پلن پر شدن دست‌نخورده می‌مونن.\n\nمطمئنی؟",
         kb, call.message.message_id
     )
-    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:pdel_go:"))
 @admin_only_call
 def cb_ares_pdel_go(call):
-    plan_id = int(call.data.split(":")[2])
-    db_execute("DELETE FROM reseller_plans WHERE id=?", (plan_id,))
     bot.answer_callback_query(call.id, "🗑 حذف شد.")
-    render_plan_list(call.message.chat.id, call.message.message_id)
+    plan_id = int(call.data.split(":")[2])
+    try:
+        db_execute("DELETE FROM reseller_plan_tiers WHERE plan_id=?", (plan_id,))
+        db_execute("DELETE FROM reseller_plans WHERE id=?", (plan_id,))
+        render_plan_list(call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        _report_error(call.message.chat.id, "حذف پلن", e)
 
 
-# ---------------- EDIT FIELDS (name/volume/price) ----------------
+# ---------------- EDIT FIELDS (name) ----------------
 
 _FIELD_PROMPTS = {
     "name": "✏️ اسم جدید پلن رو بفرست:",
@@ -408,8 +448,13 @@ def cb_ares_pedit_start(call):
     plan_id = int(plan_id)
     chat_id = call.message.chat.id
 
-    render(chat_id, _FIELD_PROMPTS[field], _back_markup(f"ares:plan:{plan_id}"), call.message.message_id)
+    if field not in _FIELD_PROMPTS:
+        bot.answer_callback_query(call.id, "فیلد نامعتبر.", show_alert=True)
+        return
+
     bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(chat_id)
+    render(chat_id, _FIELD_PROMPTS[field], _back_markup(f"ares:plan:{plan_id}"), call.message.message_id)
     bot.register_next_step_handler_by_chat_id(chat_id, _pedit_save, field, plan_id)
 
 
@@ -443,19 +488,19 @@ def _panel_pick_markup(cb_prefix, extra=""):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:pedit:panel:"))
 @admin_only_call
 def cb_ares_pedit_panel(call):
+    bot.answer_callback_query(call.id)
     plan_id = int(call.data.split(":")[3])
     kb, has_panels = _panel_pick_markup(f"ares:ppanel:{plan_id}", extra=f"ares:plan:{plan_id}")
     text = "🔁 پنل مبدا جدید رو انتخاب کن:" if has_panels else "📭 هیچ پنل فعالی نداری."
     render(call.message.chat.id, text, kb, call.message.message_id)
-    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:ppanel:"))
 @admin_only_call
 def cb_ares_ppanel_set(call):
+    bot.answer_callback_query(call.id, "✅ پنل عوض شد.")
     _, _, plan_id, panel_id = call.data.split(":")
     db_execute("UPDATE reseller_plans SET panel_id=? WHERE id=?", (int(panel_id), int(plan_id)))
-    bot.answer_callback_query(call.id, "✅ پنل عوض شد.")
     render_plan_detail(call.message.chat.id, int(plan_id), call.message.message_id)
 
 
@@ -464,10 +509,11 @@ def cb_ares_ppanel_set(call):
 @bot.callback_query_handler(func=lambda c: c.data == "ares:plan_new")
 @admin_only_call
 def cb_ares_plan_new(call):
+    bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
+    bot.clear_step_handler_by_chat_id(chat_id)
     _state[chat_id] = {"flow": "rplan_new", "data": {}}
     render(chat_id, "✏️ اسم پلن رو بفرست (مثلاً «مولتی‌لوکیشن ۵۰۰ گیگ»):", _back_markup("ares:plans"), call.message.message_id)
-    bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _new_plan_name)
 
 
@@ -498,6 +544,49 @@ def _new_plan_name(message):
     render(chat_id, "🖥 این پلن از کدوم پنل حجم بده؟", kb, screen_id)
 
 
+def _reseller_plans_columns():
+    """اسم ستون‌های واقعیِ جدول reseller_plans رو برمی‌گردونه (یا None اگه نشد)."""
+    try:
+        rows = db_execute("PRAGMA table_info(reseller_plans)", fetchall=True) or []
+        cols = {r["name"] for r in rows}
+        return cols or None
+    except Exception:
+        return None
+
+
+def _insert_reseller_plan(name, panel_id):
+    """
+    پلن جدید رو می‌سازه و فقط ستون‌هایی رو پر می‌کنه که تو جدول هستن.
+    آیدی پلن رو با SELECT برمی‌گردونه.
+    """
+    values = {
+        "name": name,
+        "price": 0,
+        "capacity": 0,
+        "duration": 0,
+        "active": 1,
+        "panel_id": panel_id,
+        "volume_gb": 0,
+        "created_at": now(),
+    }
+    existing = _reseller_plans_columns()
+    if existing:
+        values = {k: v for k, v in values.items() if k in existing}
+
+    cols = list(values.keys())
+    placeholders = ", ".join("?" for _ in cols)
+    db_execute(
+        f"INSERT INTO reseller_plans ({', '.join(cols)}) VALUES ({placeholders})",
+        tuple(values[c] for c in cols)
+    )
+
+    row = db_execute(
+        "SELECT id FROM reseller_plans WHERE name=? AND panel_id=? ORDER BY id DESC LIMIT 1",
+        (name, panel_id), fetchone=True
+    )
+    return row["id"] if row else None
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:pnpanel:"))
 @admin_only_call
 def cb_ares_pnpanel(call):
@@ -506,29 +595,23 @@ def cb_ares_pnpanel(call):
     if not st:
         bot.answer_callback_query(call.id, "⛔ این مرحله منقضی شده.", show_alert=True)
         return
-    panel_id = int(call.data.split(":")[2])
-    data = st["data"]
 
-    new_id = db_execute("""
-    INSERT INTO reseller_plans
-    (name, price, capacity, duration, active, panel_id, volume_gb, created_at)
-    VALUES (?, 0, 0, 0, 1, ?, 0, ?)
-    """, (data["name"], panel_id, now()), return_lastrowid=True)
+    # اول به تلگرام جواب بده تا دکمه گیر نکنه، حتی اگه بعدش خطا بیاد
+    bot.answer_callback_query(call.id, "⏳ در حال ساخت پلن...")
 
-    _state.pop(chat_id, None)
-    bot.answer_callback_query(call.id, "✅ پلن ساخته شد؛ حالا حجم‌هاش رو اضافه کن.")
+    try:
+        panel_id = int(call.data.split(":")[2])
+        data = st["data"]
 
-    if new_id:
-        render_plan_detail(chat_id, new_id, call.message.message_id)
-    else:
-        row = db_execute(
-            "SELECT id FROM reseller_plans WHERE name=? AND panel_id=? ORDER BY id DESC LIMIT 1",
-            (data["name"], panel_id), fetchone=True
-        )
-        if row:
-            render_plan_detail(chat_id, row["id"], call.message.message_id)
+        new_id = _insert_reseller_plan(data["name"], panel_id)
+        _state.pop(chat_id, None)
+
+        if new_id:
+            render_plan_detail(chat_id, new_id, call.message.message_id)
         else:
             render_plan_list(chat_id, call.message.message_id)
+    except Exception as e:
+        _report_error(chat_id, "ساخت پلن نمایندگی", e)
 
 
 # ============================================================
@@ -578,10 +661,10 @@ def render_reseller_list(chat_id, page, message_id=None):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:list:"))
 @admin_only_call
 def cb_ares_list(call):
+    bot.answer_callback_query(call.id)
     page = int(call.data.split(":")[2])
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
     render_reseller_list(call.message.chat.id, page, call.message.message_id)
-    bot.answer_callback_query(call.id)
 
 
 # ============================================================
@@ -634,34 +717,35 @@ def render_reseller_detail(chat_id, reseller_user_id, back_page, message_id=None
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:rv:"))
 @admin_only_call
 def cb_ares_rv(call):
+    bot.answer_callback_query(call.id)
     _, _, reseller_user_id, back_page = call.data.split(":")
     render_reseller_detail(call.message.chat.id, int(reseller_user_id), int(back_page), call.message.message_id)
-    bot.answer_callback_query(call.id)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:padj:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ares:padj:") and not c.data.startswith("ares:padj_cancel:"))
 @admin_only_call
 def cb_ares_padj_start(call):
+    bot.answer_callback_query(call.id)
     _, _, pool_id, direction = call.data.split(":")
     pool_id = int(pool_id)
     chat_id = call.message.chat.id
 
+    bot.clear_step_handler_by_chat_id(chat_id)
     _state[chat_id] = {"flow": "radj", "pool_id": pool_id, "direction": direction}
 
     prompt = "➕ چند گیگ اضافه بشه؟ (فقط عدد)" if direction == "add" else "➖ چند گیگ کم بشه؟ (فقط عدد)"
     render(chat_id, prompt, _back_markup(f"ares:padj_cancel:{pool_id}"), call.message.message_id)
-    bot.answer_callback_query(call.id)
     bot.register_next_step_handler_by_chat_id(chat_id, _padj_save)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ares:padj_cancel:"))
 @admin_only_call
 def cb_ares_padj_cancel(call):
+    bot.answer_callback_query(call.id)
     pool_id = int(call.data.split(":")[2])
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
     _state.pop(call.message.chat.id, None)
     pool = db_execute("SELECT user_id FROM reseller_panels WHERE id=?", (pool_id,), fetchone=True)
-    bot.answer_callback_query(call.id)
     if pool:
         render_reseller_detail(call.message.chat.id, pool["user_id"], 0, call.message.message_id)
 
