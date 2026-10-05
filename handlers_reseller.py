@@ -1,28 +1,32 @@
 # ============================================================
-# handlers_reseller.py  [نسخه: می‌پرسه حجم/مدت/دستگاه — اگه این خط رو
-# تو فایل سرورت نمی‌بینی یعنی فایل قدیمی هنوز جایگزین نشده]
+# handlers_reseller.py  [نسخه‌ی اصلاح‌شده v2]
 # پنل نمایندگی از دید کاربر:
 #   - خرید حجم نمایندگی (کارت به کارت، نیاز به تأیید ادمین)
 #   - پنل‌های من = استخرهای حجمی که در هر پنل داره
-#   - ساخت سرویس نامحدود برای مشتری (فقط از استخر کم می‌شود، قطره‌ای)
+#   - ساخت سرویس برای مشتری (نام / حجم / مدت / دستگاه + QR کد)
 #   - کاربران من = لیست سرویس‌هایی که برای مشتری‌هاش ساخته
 #
-# نکته‌ی مهم طراحی: «مشتریِ نماینده» یک کاربر تلگرامی جدا نیست.
-# سرویس مستقیم زیر حساب خودِ نماینده ثبت می‌شود (user_id = خودِ
-# نماینده) و فقط یک نام دلخواه روی آن است؛ نماینده خودش لینک
-# اشتراک را دستی به مشتری‌اش می‌دهد.
+# نکته‌ی طراحی: «مشتریِ نماینده» یک کاربر تلگرامی جدا نیست.
+# سرویس زیر حساب خودِ نماینده ثبت میشه (reseller_id = خودِ نماینده).
+# کم شدن از استخر «قطره‌ای» و بر اساس مصرف واقعی انجام میشه
+# (کارش با reseller_billing هست، نه این فایل).
+#
+# نیازمندی جدید:  pip install "qrcode[pil]"
 # ============================================================
 
+import io
+import math
 import re
+import traceback
 from datetime import datetime, timedelta
 
+import qrcode
 from telebot import types
 
 from config import bot
 from database import db_execute, get_setting, now
 from models import get_user, internal_user_id
 from pasarguard_api import (
-    pasarguard_create_unlimited_service,
     pasarguard_create_service,
     pasarguard_set_status,
     pasarguard_delete_service,
@@ -31,7 +35,7 @@ from pasarguard_api import (
 import chat_clean as cc
 import reseller_billing
 
-# فلوی چندمرحله‌ایِ «ساخت سرویس برای مشتری» (حجم/زمان/تعداد کاربر)
+# فلوی چندمرحله‌ایِ «ساخت سرویس برای مشتری»
 _draft = {}  # chat_id -> dict
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,20}$")
@@ -53,6 +57,18 @@ def render(chat_id, text, kb, message_id=None):
     return sent.message_id if sent else None
 
 
+def _edit_screen(chat_id, text, kb):
+    """برای مراحل پرسش‌وپاسخ: صفحه‌ی فعلی رو ادیت می‌کنه، وگرنه پیام جدید."""
+    screen_id = cc.get_screen(chat_id)
+    if screen_id:
+        try:
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+
 def _home_markup():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
@@ -61,9 +77,8 @@ def _home_markup():
 
 def _get_pool(pool_id, owner_user_id):
     """
-    عمداً اسم واقعیِ پنل (که فقط سوپرادمین می‌بینه) اینجا برنمی‌گرده؛
-    به‌جاش اسمِ پلن نمایندگی (همونی که خود نماینده موقع خرید دیده)
-    به‌عنوان برچسب استخر نشون داده میشه.
+    اسم واقعیِ پنل (که فقط سوپرادمین می‌بینه) برنمی‌گرده؛
+    اسمِ پلن نمایندگی به‌عنوان برچسب استخر نشون داده میشه.
     """
     return db_execute("""
     SELECT reseller_panels.*, reseller_plans.name AS pool_label
@@ -74,9 +89,6 @@ def _get_pool(pool_id, owner_user_id):
 
 
 def _pool_label(pool):
-    # pool ممکنه از جایی اومده باشه که join با reseller_plans نداشته
-    # (مثلاً SELECT * FROM reseller_panels ساده)، پس کلید pool_label
-    # شاید اصلاً وجود نداشته باشه. اینجوری هیچ‌وقت کرش نمی‌کنه.
     try:
         label = pool["pool_label"]
     except (IndexError, KeyError):
@@ -108,6 +120,18 @@ def _fmt_gb(value):
     return f"{value:.2f}"
 
 
+def _send_qr(chat_id, link, username):
+    """QR کد لینک اشتراک رو به‌صورت عکس می‌فرسته."""
+    try:
+        img = qrcode.make(link)
+        bio = io.BytesIO()
+        img.save(bio, format="PNG")
+        bio.seek(0)
+        bot.send_photo(chat_id, bio, caption=f"📱 QR کد اشتراک — {username}")
+    except Exception:
+        traceback.print_exc()
+
+
 # ============================================================
 # MAIN MENU
 # ============================================================
@@ -122,40 +146,32 @@ def _reseller_menu_markup():
     return kb
 
 
+_MENU_TEXT = (
+    "🤝 <b>پنل نمایندگی</b>\n\n"
+    "از این قسمت می‌تونی حجم نمایندگی بخری، برای مشتری‌هات سرویس بسازی و وضعیت استخرهات رو ببینی."
+)
+
+
 @bot.message_handler(func=lambda m: m.text == "🤝 پنل نمایندگی")
 def reseller_menu(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
     cc.drop(message)
-    cc.show(
-        message.chat.id,
-        "🤝 <b>پنل نمایندگی</b>\n\n"
-        "از این قسمت می‌تونی حجم نمایندگی بخری، برای مشتری‌هات سرویس بسازی و وضعیت استخرهات رو ببینی.",
-        reply_markup=_reseller_menu_markup(),
-        parse_mode="HTML"
-    )
+    cc.show(message.chat.id, _MENU_TEXT, reply_markup=_reseller_menu_markup(), parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "res_menu")
 def res_menu_cb(call):
     bot.answer_callback_query(call.id)
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
-    render(
-        call.message.chat.id,
-        "🤝 <b>پنل نمایندگی</b>\n\n"
-        "از این قسمت می‌تونی حجم نمایندگی بخری، برای مشتری‌هات سرویس بسازی و وضعیت استخرهات رو ببینی.",
-        _reseller_menu_markup(),
-        call.message.message_id
-    )
+    _draft.pop(call.message.chat.id, None)
+    render(call.message.chat.id, _MENU_TEXT, _reseller_menu_markup(), call.message.message_id)
 
 
 # ============================================================
 # BUY RESELLER VOLUME
 # ============================================================
 
-@bot.callback_query_handler(func=lambda call: call.data == "res_buy")
-def res_buy(call):
-    bot.answer_callback_query(call.id)
-
+def _show_buy_list(chat_id, message_id):
     plans = db_execute("""
     SELECT reseller_plans.*, panels.name AS panel_name
     FROM reseller_plans
@@ -168,14 +184,20 @@ def res_buy(call):
 
     if not plans:
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
-        render(call.message.chat.id, "📭 فعلاً پلن نمایندگی‌ای تعریف نشده.", kb, call.message.message_id)
+        render(chat_id, "📭 فعلاً پلن نمایندگی‌ای تعریف نشده.", kb, message_id)
         return
 
     for plan in plans:
         kb.add(types.InlineKeyboardButton(f"🤝 {plan['name']}", callback_data=f"resplan:{plan['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
 
-    render(call.message.chat.id, "🤝 <b>خرید حجم نمایندگی</b>\n\nیه پلن انتخاب کن:", kb, call.message.message_id)
+    render(chat_id, "🤝 <b>خرید حجم نمایندگی</b>\n\nیه پلن انتخاب کن:", kb, message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "res_buy")
+def res_buy(call):
+    bot.answer_callback_query(call.id)
+    _show_buy_list(call.message.chat.id, call.message.message_id)
 
 
 def _plan_tiers(plan_id):
@@ -185,9 +207,8 @@ def _plan_tiers(plan_id):
     ) or []
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("resplan:"))
-def resplan_detail(call):
-    plan_id = int(call.data.split(":")[1])
+def _show_plan(chat_id, message_id, plan_id):
+    """False برمی‌گردونه اگه پلن پیدا نشد."""
     plan = db_execute("""
     SELECT reseller_plans.*, panels.name AS panel_name
     FROM reseller_plans
@@ -196,11 +217,10 @@ def resplan_detail(call):
     """, (plan_id,), fetchone=True)
 
     if not plan:
-        bot.answer_callback_query(call.id, "این پلن دیگر موجود نیست.", show_alert=True)
-        return
+        return False
 
-    bot.answer_callback_query(call.id)
     tiers = _plan_tiers(plan_id)
+    has_custom = bool(plan["price_per_gb"] and plan["price_per_gb"] > 0)
 
     kb = types.InlineKeyboardMarkup()
     for tier in tiers:
@@ -208,17 +228,17 @@ def resplan_detail(call):
             f"📦 {_fmt_gb(tier['volume_gb'])}GB — {tier['price']:,} تومان",
             callback_data=f"respaytier:{tier['id']}"
         ))
-    if plan["price_per_gb"] and plan["price_per_gb"] > 0:
+    if has_custom:
         kb.add(types.InlineKeyboardButton("💬 حجم دلخواه", callback_data=f"rescustomvol:{plan_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_buy"))
 
     lines = [f"🤝 <b>{plan['name']}</b>\n"]
-    if not tiers and not (plan["price_per_gb"] and plan["price_per_gb"] > 0):
+    if not tiers and not has_custom:
         lines.append("📭 فعلاً هیچ گزینه‌ی خریدی براش تعریف نشده.")
     else:
         if tiers:
             lines.append("یکی از حجم‌های آماده رو انتخاب کن:")
-        if plan["price_per_gb"] and plan["price_per_gb"] > 0:
+        if has_custom:
             lines.append(
                 f"یا «💬 حجم دلخواه» (حداقل {_fmt_gb(plan['custom_min_gb'] or 300)} گیگ، "
                 f"هر گیگ {plan['price_per_gb']:,} تومان)"
@@ -227,7 +247,17 @@ def resplan_detail(call):
         "\n⏳ بدون محدودیت زمانی. با هر خرید بیشتر، حجم به استخر قبلیت اضافه میشه (جمع میشه)."
     )
 
-    render(call.message.chat.id, "\n".join(lines), kb, call.message.message_id)
+    render(chat_id, "\n".join(lines), kb, message_id)
+    return True
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("resplan:"))
+def resplan_detail(call):
+    plan_id = int(call.data.split(":")[1])
+    if not _show_plan(call.message.chat.id, call.message.message_id, plan_id):
+        bot.answer_callback_query(call.id, "این پلن دیگر موجود نیست.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
 
 
 def _start_payment(chat_id, message_id, back_cb, volume_gb, price, reseller_plan_id):
@@ -300,21 +330,13 @@ def rescustomvol_start(call):
 def _customvol_amount(message, plan_id):
     chat_id = message.chat.id
     cc.drop(message)
-    screen_id = cc.get_screen(chat_id)
 
     plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
     kb_back = types.InlineKeyboardMarkup()
     kb_back.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"resplan:{plan_id}"))
 
     if not plan or not plan["price_per_gb"]:
-        text = "❌ این پلن دیگه موجود نیست."
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb_back)
-                return
-            except Exception:
-                pass
-        cc.show(chat_id, text, reply_markup=kb_back)
+        _edit_screen(chat_id, "❌ این پلن دیگه موجود نیست.", kb_back)
         return
 
     min_gb = plan["custom_min_gb"] or 300
@@ -322,52 +344,51 @@ def _customvol_amount(message, plan_id):
 
     try:
         amount = float(text_raw)
+        if not math.isfinite(amount):
+            amount = -1
     except ValueError:
         amount = -1
 
     if amount < min_gb:
-        text = f"❌ حداقل {_fmt_gb(min_gb)} گیگ باید باشه. دوباره یه عدد بفرست:"
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb_back)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb_back)
-        else:
-            cc.show(chat_id, text, reply_markup=kb_back)
+        _edit_screen(chat_id, f"❌ حداقل {_fmt_gb(min_gb)} گیگ باید باشه. دوباره یه عدد بفرست:", kb_back)
         bot.register_next_step_handler_by_chat_id(chat_id, _customvol_amount, plan_id)
         return
 
     price = round(amount * plan["price_per_gb"])
-    back_cb = f"resplan:{plan_id}"
 
     kb = types.InlineKeyboardMarkup()
     kb.row(
-        types.InlineKeyboardButton("✅ تایید و پرداخت", callback_data=f"rescustomvol_go:{plan_id}:{amount}"),
-        types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb),
+        types.InlineKeyboardButton("✅ تایید و پرداخت", callback_data=f"rescustomvol_go:{plan_id}:{amount:g}"),
+        types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"resplan:{plan_id}"),
     )
-    text = (
+    _edit_screen(
+        chat_id,
         f"📦 حجم: <b>{_fmt_gb(amount)} GB</b>\n"
         f"💰 مبلغ: <b>{price:,} تومان</b>\n\n"
-        "تایید می‌کنی؟"
+        "تایید می‌کنی؟",
+        kb
     )
-    if screen_id:
-        try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            return
-        except Exception:
-            pass
-    cc.show(chat_id, text, reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rescustomvol_go:"))
 def rescustomvol_go(call):
-    _, plan_id, amount = call.data.split(":")
-    plan_id = int(plan_id)
-    amount = float(amount)
+    try:
+        _, plan_id, amount = call.data.split(":")
+        plan_id = int(plan_id)
+        amount = float(amount)
+    except ValueError:
+        bot.answer_callback_query(call.id, "داده نامعتبر.", show_alert=True)
+        return
 
     plan = db_execute("SELECT * FROM reseller_plans WHERE id=? AND active=1", (plan_id,), fetchone=True)
     if not plan or not plan["price_per_gb"]:
         bot.answer_callback_query(call.id, "این پلن دیگه موجود نیست.", show_alert=True)
+        return
+
+    # callback_data از سمت کاربر قابل دست‌کاریه؛ حداقل رو دوباره چک می‌کنیم
+    min_gb = plan["custom_min_gb"] or 300
+    if not math.isfinite(amount) or amount < min_gb:
+        bot.answer_callback_query(call.id, f"حداقل {_fmt_gb(min_gb)} گیگ.", show_alert=True)
         return
 
     price = round(amount * plan["price_per_gb"])
@@ -385,17 +406,9 @@ def respay_receipt(message, reseller_plan_id, volume_gb, price, back_cb):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 انصراف", callback_data=back_cb))
-    screen_id = cc.get_screen(chat_id)
 
     if not message.photo:
-        text = "❌ فقط تصویر رسید رو بفرست."
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb)
-        else:
-            cc.show(chat_id, text, reply_markup=kb)
+        _edit_screen(chat_id, "❌ فقط تصویر رسید رو بفرست.", kb)
         bot.register_next_step_handler_by_chat_id(
             chat_id, respay_receipt, reseller_plan_id, volume_gb, price, back_cb
         )
@@ -419,14 +432,7 @@ def respay_receipt(message, reseller_plan_id, volume_gb, price, back_cb):
     ok_kb = types.InlineKeyboardMarkup()
     ok_kb.add(types.InlineKeyboardButton("🔙 بازگشت به پنل نمایندگی", callback_data="res_menu"))
 
-    text = "✅ رسید ثبت شد.\n\n⏳ بعد از تأیید مدیریت، حجم به استخرت اضافه میشه."
-    if screen_id:
-        try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=ok_kb)
-            return
-        except Exception:
-            pass
-    cc.show(chat_id, text, reply_markup=ok_kb)
+    _edit_screen(chat_id, "✅ رسید ثبت شد.\n\n⏳ بعد از تأیید مدیریت، حجم به استخرت اضافه میشه.", ok_kb)
 
 
 # ============================================================
@@ -435,8 +441,11 @@ def respay_receipt(message, reseller_plan_id, volume_gb, price, back_cb):
 
 def apply_reseller_topup(payment):
     """
-    بعد از تأیید ادمین: حجمِ پلنِ خریداری‌شده به استخر نماینده تو
-    همون پنل اضافه میشه (اگه استخری نباشه، ساخته میشه).
+    بعد از تأیید ادمین: حجمِ خریداری‌شده به استخر نماینده تو همون پنل
+    اضافه میشه (اگه استخری نباشه، ساخته میشه).
+    توجه: جلوگیری از تأیید دوباره‌ی یک پرداخت (idempotency) باید تو
+    handlers_payment.py انجام بشه (وضعیت payment رو قبل از صدا زدن
+    این تابع از pending عوض کن).
     """
     reseller_plan_id = payment["reseller_plan_id"] if "reseller_plan_id" in payment.keys() else None
     if not reseller_plan_id:
@@ -450,9 +459,6 @@ def apply_reseller_topup(payment):
     if not panel_id:
         return False, "این پلن نمایندگی به هیچ پنلی وصل نیست"
 
-    # حجم واقعیِ همین خرید (تیر انتخابی یا مقدار دلخواه)؛ برای
-    # پرداخت‌های خیلی قدیمی که این ستون رو نداشتن، از حجم خودِ پلن
-    # استفاده می‌شه (سازگاری با عقب).
     volume = payment["reseller_volume_gb"] if "reseller_volume_gb" in payment.keys() else None
     if not volume:
         volume = rplan["volume_gb"] or 0
@@ -464,13 +470,14 @@ def apply_reseller_topup(payment):
     )
 
     if pool:
-        new_balance = (pool["balance"] or 0) + volume
-        new_total = (pool["total_purchased"] or 0) + volume
+        # اتمیک: خوندن و نوشتن جدا نیست
         db_execute("""
         UPDATE reseller_panels
-        SET balance=?, total_purchased=?, active=1, updated_at=?
+        SET balance = COALESCE(balance, 0) + ?,
+            total_purchased = COALESCE(total_purchased, 0) + ?,
+            active=1, updated_at=?
         WHERE id=?
-        """, (new_balance, new_total, now(), pool["id"]))
+        """, (volume, volume, now(), pool["id"]))
     else:
         db_execute("""
         INSERT INTO reseller_panels
@@ -496,7 +503,7 @@ def apply_reseller_topup(payment):
 
 
 # ============================================================
-# MY POOLS
+# MY POOLS  (پنل‌های من)
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "res_pools")
@@ -523,7 +530,7 @@ def res_pools(call):
     for pool in pools:
         icon = "🟢" if pool["active"] and (pool["balance"] or 0) > 0 else "🔴"
         kb.add(types.InlineKeyboardButton(
-            f"{icon} {_pool_label(pool)}",
+            f"{icon} {_pool_label(pool)} — {_fmt_gb(pool['balance'])}GB",
             callback_data=f"respool:{pool['id']}"
         ))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_menu"))
@@ -537,13 +544,18 @@ def _pool_customer_stats(pool):
     FROM services
     WHERE reseller_id=? AND panel_id=?
     """, (pool["user_id"], pool["panel_id"]), fetchone=True)
-    total = row["total"] or 0
-    active = row["active"] or 0
+    total = (row["total"] if row else 0) or 0
+    active = (row["active"] if row else 0) or 0
     return active, total
 
 
 def _render_pool_detail(chat_id, pool_id, message_id=None, online_note=None):
-    pool = db_execute("SELECT * FROM reseller_panels WHERE id=?", (pool_id,), fetchone=True)
+    pool = db_execute("""
+    SELECT reseller_panels.*, reseller_plans.name AS pool_label
+    FROM reseller_panels
+    LEFT JOIN reseller_plans ON reseller_plans.id = reseller_panels.reseller_plan_id
+    WHERE reseller_panels.id=?
+    """, (pool_id,), fetchone=True)
 
     if not pool:
         kb = types.InlineKeyboardMarkup()
@@ -562,7 +574,7 @@ def _render_pool_detail(chat_id, pool_id, message_id=None, online_note=None):
 
     kb = types.InlineKeyboardMarkup()
     if balance > 0:
-        kb.add(types.InlineKeyboardButton("🛒 فروش تکی جدید", callback_data=f"resnew:{pool_id}"))
+        kb.add(types.InlineKeyboardButton("➕ ساخت کانفیگ جدید", callback_data=f"resnew:{pool_id}"))
 
     kb.row(
         types.InlineKeyboardButton("👥 مشتری‌های این پنل", callback_data=f"respoolcust:{pool_id}"),
@@ -573,11 +585,10 @@ def _render_pool_detail(chat_id, pool_id, message_id=None, online_note=None):
         types.InlineKeyboardButton("📊 گراف مصرف روزانه", callback_data=f"respoolchart:{pool_id}"),
     )
     kb.row(
-        types.InlineKeyboardButton("⏸ خاموش کردن همه", callback_data=f"respoolpause:{pool_id}")
-        if active_customers > 0 else
+        types.InlineKeyboardButton("⏸ خاموش کردن همه", callback_data=f"respoolpause:{pool_id}"),
         types.InlineKeyboardButton("▶️ روشن کردن همه", callback_data=f"respoolresume:{pool_id}"),
-        types.InlineKeyboardButton("🔋 افزایش حجم این پنل", callback_data=f"respooltopup:{pool_id}"),
     )
+    kb.add(types.InlineKeyboardButton("🔋 تمدید / افزایش حجم", callback_data=f"respooltopup:{pool_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="res_pools"))
 
     text = (
@@ -586,14 +597,26 @@ def _render_pool_detail(chat_id, pool_id, message_id=None, online_note=None):
         f"📊 <b>مصرف از استخر</b>\n"
         f"{_progress_bar(used, total_purchased)}\n"
         f"مصرف‌شده: {_fmt_gb(used)} GB از {_fmt_gb(total_purchased)} GB\n"
-        f"کل خریداری‌شده: {_fmt_gb(total_purchased)} GB\n"
         f"باقیمونده: <b>{_fmt_gb(balance)} GB</b>\n\n"
         f"👥 مشتری‌ها: {active_customers} فعال از {total_customers} کل"
     )
     if online_note:
-        text += f"\n{online_note}"
+        text += f"\n\n{online_note}"
 
     render(chat_id, text, kb, message_id)
+
+
+def _report_error(call, where, exc):
+    """خطا رو تو لاگ سرور چاپ می‌کنه و متنش رو تو چت نشون میده تا دیباگ راحت باشه."""
+    traceback.print_exc()
+    try:
+        bot.send_message(
+            call.message.chat.id,
+            f"⚠️ خطا ({where}):\n<code>{type(exc).__name__}: {exc}</code>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respool:"))
@@ -610,250 +633,284 @@ def respool_detail(call):
         bot.answer_callback_query(call.id)
         _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id)
     except Exception as e:
-        try:
-            bot.answer_callback_query(call.id, f"⚠️ خطا: {e}", show_alert=True)
-        except Exception:
-            pass
+        _report_error(call, "باز کردن پنل", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolrefresh:"))
 def respool_refresh(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
-
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
-
-    bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی مصرف...")
     try:
-        reseller_billing.refresh_pool(pool_id)
-    except Exception:
-        pass
-    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id)
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
+
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی مصرف...")
+        try:
+            reseller_billing.refresh_pool(pool_id)
+        except Exception:
+            traceback.print_exc()
+        _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id)
+    except Exception as e:
+        _report_error(call, "بروزرسانی", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolonline:"))
 def respool_online(call):
-    """
-    شمارشِ تخمینیِ «آنلاین الان»: برای هر مشتریِ فعالِ این پنل یه درخواست
-    به پنل می‌زنه و چک می‌کنه آخرین باری که دیده شده زیر ۳ دقیقه‌ست یا نه.
-    اگه مشتری زیاد باشه ممکنه چند ثانیه طول بکشه.
-    """
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    """شمارشِ تخمینیِ «آنلاین الان»؛ اگه مشتری زیاد باشه ممکنه چند ثانیه طول بکشه."""
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    bot.answer_callback_query(call.id, "⏳ در حال چک کردن وضعیت آنلاین...")
+        bot.answer_callback_query(call.id, "⏳ در حال چک کردن وضعیت آنلاین...")
 
-    panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
-    services = db_execute(
-        "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status='active'",
-        (pool["user_id"], pool["panel_id"]), fetchall=True
-    ) or []
+        panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
+        services = db_execute(
+            "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status='active'",
+            (pool["user_id"], pool["panel_id"]), fetchall=True
+        ) or []
 
-    online_count = 0
-    checked = 0
-    if panel:
-        for svc in services:
-            if not svc["username"]:
-                continue
-            usage = pasarguard_get_user_usage(panel, svc["username"])
-            checked += 1
-            if usage.get("success") and usage.get("online"):
-                online_count += 1
+        online_count = 0
+        checked = 0
+        if panel:
+            for svc in services:
+                if not svc["username"]:
+                    continue
+                try:
+                    usage = pasarguard_get_user_usage(panel, svc["username"])
+                except Exception:
+                    continue
+                checked += 1
+                if usage.get("success") and usage.get("online"):
+                    online_count += 1
 
-    note = f"📶 آنلاین الان (تخمینی): <b>{online_count}</b> از {checked} مشتری فعال"
-    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=note)
+        note = f"📶 آنلاین الان (تخمینی): <b>{online_count}</b> از {checked} مشتری فعال"
+        _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=note)
+    except Exception as e:
+        _report_error(call, "آنلاین", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolpause:"))
 def respool_pause_all(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
-    services = db_execute(
-        "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status='active'",
-        (pool["user_id"], pool["panel_id"]), fetchall=True
-    ) or []
+        panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
+        services = db_execute(
+            "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status='active'",
+            (pool["user_id"], pool["panel_id"]), fetchall=True
+        ) or []
 
-    bot.answer_callback_query(call.id, f"⏳ در حال خاموش کردن {len(services)} سرویس...")
+        if not services:
+            bot.answer_callback_query(call.id, "سرویس فعالی نیست.", show_alert=True)
+            return
 
-    done = 0
-    for svc in services:
-        if panel and svc["username"]:
-            try:
-                pasarguard_set_status(panel, svc["username"], enabled=False)
-            except Exception:
-                continue
-        db_execute("UPDATE services SET status='disabled', updated_at=? WHERE id=?", (now(), svc["id"]))
-        done += 1
+        bot.answer_callback_query(call.id, f"⏳ در حال خاموش کردن {len(services)} سرویس...")
 
-    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=f"⏸ {done} سرویس خاموش شد.")
+        done = 0
+        failed = 0
+        for svc in services:
+            if panel and svc["username"]:
+                try:
+                    result = pasarguard_set_status(panel, svc["username"], enabled=False)
+                    if not result.get("success"):
+                        failed += 1
+                        continue
+                except Exception:
+                    failed += 1
+                    continue
+            db_execute("UPDATE services SET status='disabled', updated_at=? WHERE id=?", (now(), svc["id"]))
+            done += 1
+
+        note = f"⏸ {done} سرویس خاموش شد."
+        if failed:
+            note += f"\n⚠️ {failed} سرویس خاموش نشد (خطای پنل)."
+        _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=note)
+    except Exception as e:
+        _report_error(call, "خاموش کردن همه", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolresume:"))
 def respool_resume_all(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    if (pool["balance"] or 0) <= 0:
-        bot.answer_callback_query(call.id, "❌ این استخر موجودی نداره، اول شارژش کن.", show_alert=True)
-        return
+        if (pool["balance"] or 0) <= 0:
+            bot.answer_callback_query(call.id, "❌ این استخر موجودی نداره، اول شارژش کن.", show_alert=True)
+            return
 
-    panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
-    services = db_execute(
-        "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status!='active'",
-        (pool["user_id"], pool["panel_id"]), fetchall=True
-    ) or []
+        panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
+        services = db_execute(
+            "SELECT * FROM services WHERE reseller_id=? AND panel_id=? AND status!='active'",
+            (pool["user_id"], pool["panel_id"]), fetchall=True
+        ) or []
 
-    bot.answer_callback_query(call.id, f"⏳ در حال روشن کردن {len(services)} سرویس...")
+        if not services:
+            bot.answer_callback_query(call.id, "سرویس خاموشی نیست.", show_alert=True)
+            return
 
-    done = 0
-    for svc in services:
-        if panel and svc["username"]:
-            try:
-                result = pasarguard_set_status(panel, svc["username"], enabled=True)
-                if not result.get("success"):
+        bot.answer_callback_query(call.id, f"⏳ در حال روشن کردن {len(services)} سرویس...")
+
+        done = 0
+        failed = 0
+        for svc in services:
+            if panel and svc["username"]:
+                try:
+                    result = pasarguard_set_status(panel, svc["username"], enabled=True)
+                    if not result.get("success"):
+                        failed += 1
+                        continue
+                except Exception:
+                    failed += 1
                     continue
-            except Exception:
-                continue
-        db_execute("UPDATE services SET status='active', updated_at=? WHERE id=?", (now(), svc["id"]))
-        done += 1
+            db_execute("UPDATE services SET status='active', updated_at=? WHERE id=?", (now(), svc["id"]))
+            done += 1
 
-    db_execute("UPDATE reseller_panels SET active=1 WHERE id=?", (pool["id"],))
-    _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=f"▶️ {done} سرویس روشن شد.")
+        db_execute("UPDATE reseller_panels SET active=1 WHERE id=?", (pool["id"],))
+        note = f"▶️ {done} سرویس روشن شد."
+        if failed:
+            note += f"\n⚠️ {failed} سرویس روشن نشد (خطای پنل)."
+        _render_pool_detail(call.message.chat.id, pool_id, call.message.message_id, online_note=note)
+    except Exception as e:
+        _report_error(call, "روشن کردن همه", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respooltopup:"))
 def respool_topup(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
-
-    bot.answer_callback_query(call.id)
-
-    if pool["reseller_plan_id"]:
-        plan = db_execute(
-            "SELECT id FROM reseller_plans WHERE id=? AND active=1",
-            (pool["reseller_plan_id"],), fetchone=True
-        )
-        if plan:
-            fake_call = call
-            fake_call.data = f"resplan:{plan['id']}"
-            resplan_detail(fake_call)
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
             return
 
-    # اگه پلن اصلی‌اش دیگه فعال نیست یا مشخص نیست، میره به لیست کلی خرید
-    res_buy(call)
+        bot.answer_callback_query(call.id)
+        chat_id, message_id = call.message.chat.id, call.message.message_id
+
+        if pool["reseller_plan_id"]:
+            if _show_plan(chat_id, message_id, pool["reseller_plan_id"]):
+                return
+
+        # پلن اصلی دیگه فعال نیست یا مشخص نیست → لیست کلی خرید
+        _show_buy_list(chat_id, message_id)
+    except Exception as e:
+        _report_error(call, "افزایش حجم", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolchart:"))
 def respool_chart(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    bot.answer_callback_query(call.id)
+        bot.answer_callback_query(call.id)
 
-    rows = db_execute("""
-    SELECT substr(created_at, 1, 10) AS day, SUM(amount_gb) AS total
-    FROM reseller_usage_log
-    WHERE reseller_panel_id=?
-    GROUP BY day
-    ORDER BY day DESC
-    LIMIT 7
-    """, (pool_id,), fetchall=True) or []
-    rows = list(reversed(rows))
+        rows = db_execute("""
+        SELECT substr(created_at, 1, 10) AS day, SUM(amount_gb) AS total
+        FROM reseller_usage_log
+        WHERE reseller_panel_id=?
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 7
+        """, (pool_id,), fetchall=True) or []
+        rows = list(reversed(rows))
 
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
 
-    if not rows:
-        render(call.message.chat.id, "📊 هنوز مصرفی ثبت نشده که نموداری نشونت بدم.", kb, call.message.message_id)
-        return
+        if not rows:
+            render(call.message.chat.id, "📊 هنوز مصرفی ثبت نشده که نموداری نشونت بدم.", kb, call.message.message_id)
+            return
 
-    max_val = max((r["total"] or 0) for r in rows) or 1
-    bar_width = 12
-    lines = [f"📊 <b>مصرف {len(rows)} روز اخیر — {_pool_label(pool)}</b>\n"]
-    for r in rows:
-        val = r["total"] or 0
-        filled = max(1, round((val / max_val) * bar_width)) if val > 0 else 0
-        bar = "🟩" * filled + "⬜️" * (bar_width - filled)
-        lines.append(f"<code>{r['day']}</code>  {bar}  {_fmt_gb(val)}GB")
+        max_val = max((r["total"] or 0) for r in rows) or 1
+        bar_width = 12
+        lines = [f"📊 <b>مصرف {len(rows)} روز اخیر — {_pool_label(pool)}</b>\n"]
+        for r in rows:
+            val = r["total"] or 0
+            filled = max(1, round((val / max_val) * bar_width)) if val > 0 else 0
+            bar = "🟩" * filled + "⬜️" * (bar_width - filled)
+            lines.append(f"<code>{r['day']}</code>  {bar}  {_fmt_gb(val)}GB")
 
-    total_week = sum((r["total"] or 0) for r in rows)
-    lines.append(f"\nجمع این بازه: <b>{_fmt_gb(total_week)} GB</b>")
+        total_week = sum((r["total"] or 0) for r in rows)
+        lines.append(f"\nجمع این بازه: <b>{_fmt_gb(total_week)} GB</b>")
 
-    render(call.message.chat.id, "\n".join(lines), kb, call.message.message_id)
+        render(call.message.chat.id, "\n".join(lines), kb, call.message.message_id)
+    except Exception as e:
+        _report_error(call, "گراف مصرف", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respoolcust:"))
 def respool_customers(call):
-    pool_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
+    try:
+        pool_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    if not pool:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+        if not pool:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    services = db_execute("""
-    SELECT * FROM services
-    WHERE reseller_id=? AND panel_id=?
-    ORDER BY id DESC
-    LIMIT 50
-    """, (pool["user_id"], pool["panel_id"]), fetchall=True) or []
+        services = db_execute("""
+        SELECT * FROM services
+        WHERE reseller_id=? AND panel_id=?
+        ORDER BY id DESC
+        LIMIT 50
+        """, (pool["user_id"], pool["panel_id"]), fetchall=True) or []
 
-    bot.answer_callback_query(call.id)
-    kb = types.InlineKeyboardMarkup()
+        bot.answer_callback_query(call.id)
+        kb = types.InlineKeyboardMarkup()
 
-    if not services:
+        if not services:
+            kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
+            render(call.message.chat.id, "📭 هنوز برای این پنل مشتری‌ای نساختی.", kb, call.message.message_id)
+            return
+
+        for svc in services:
+            icon = "🟢" if svc["status"] == "active" else "🔴"
+            kb.add(types.InlineKeyboardButton(
+                f"{icon} {svc['username']}",
+                callback_data=f"rescust:{svc['id']}:respoolcust:{pool_id}"
+            ))
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-        render(call.message.chat.id, "📭 هنوز برای این پنل مشتری‌ای نساختی.", kb, call.message.message_id)
-        return
 
-    for svc in services:
-        icon = "🟢" if svc["status"] == "active" else "🔴"
-        kb.add(types.InlineKeyboardButton(
-            f"{icon} {svc['username']}",
-            callback_data=f"rescust:{svc['id']}:respoolcust:{pool_id}"
-        ))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-
-    render(
-        call.message.chat.id,
-        f"👥 <b>مشتری‌های {_pool_label(pool)}</b>\n\nروی هرکدوم بزن:",
-        kb, call.message.message_id
-    )
+        render(
+            call.message.chat.id,
+            f"👥 <b>مشتری‌های {_pool_label(pool)}</b>\n\nروی هرکدوم بزن:",
+            kb, call.message.message_id
+        )
+    except Exception as e:
+        _report_error(call, "لیست مشتری‌ها", e)
 
 
 # ============================================================
-# CREATE CUSTOMER SERVICE
+# CREATE CUSTOMER SERVICE  (ساخت کانفیگ)
+# نام → حجم → مدت → دستگاه → تأیید → ساخت + لینک + QR
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resnew:"))
@@ -868,6 +925,7 @@ def resnew_start(call):
 
     bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
+    _draft.pop(chat_id, None)
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
@@ -894,16 +952,9 @@ def resnew_name(message, pool_id):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-    screen_id = cc.get_screen(chat_id)
 
     def _reask(text):
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb)
-        else:
-            cc.show(chat_id, text, reply_markup=kb)
+        _edit_screen(chat_id, text, kb)
         bot.register_next_step_handler_by_chat_id(chat_id, resnew_name, pool_id)
 
     if not pool or (pool["balance"] or 0) <= 0:
@@ -923,17 +974,12 @@ def resnew_name(message, pool_id):
 
     _draft[chat_id] = {"pool_id": pool_id, "raw": raw}
 
-    text = (
-        f"📊 این مشتری چند گیگ داشته باشه؟ (فقط عدد)\n\n"
-        f"باقیمونده‌ی استخرت: {_fmt_gb(pool['balance'])} گیگ"
+    _edit_screen(
+        chat_id,
+        "📊 این مشتری چند گیگ داشته باشه؟ (فقط عدد)\n\n"
+        f"باقیمونده‌ی استخرت: {_fmt_gb(pool['balance'])} گیگ",
+        kb
     )
-    if screen_id:
-        try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-        except Exception:
-            cc.show(chat_id, text, reply_markup=kb)
-    else:
-        cc.show(chat_id, text, reply_markup=kb)
     bot.register_next_step_handler_by_chat_id(chat_id, resnew_volume, pool_id)
 
 
@@ -944,36 +990,32 @@ def resnew_volume(message, pool_id):
     if not draft:
         return
 
+    user_id = internal_user_id(message.from_user.id)
+    pool = _get_pool(pool_id, user_id)
+    balance = (pool["balance"] or 0) if pool else 0
+
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-    screen_id = cc.get_screen(chat_id)
+
+    def _reask(text):
+        _edit_screen(chat_id, text, kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, resnew_volume, pool_id)
 
     text = (message.text or "").strip().replace(",", ".")
     try:
         volume = float(text)
-        if volume <= 0:
+        if not math.isfinite(volume) or volume <= 0:
             raise ValueError
     except ValueError:
-        err = "❌ فقط عدد بزرگ‌تر از صفر بفرست:"
-        if screen_id:
-            try:
-                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, err, reply_markup=kb)
-        else:
-            cc.show(chat_id, err, reply_markup=kb)
-        bot.register_next_step_handler_by_chat_id(chat_id, resnew_volume, pool_id)
+        _reask("❌ فقط عدد بزرگ‌تر از صفر بفرست:")
+        return
+
+    if volume > balance:
+        _reask(f"❌ حجم مشتری نمی‌تونه از باقیمونده‌ی استخر ({_fmt_gb(balance)} گیگ) بیشتر باشه. یه عدد کمتر بفرست:")
         return
 
     draft["volume"] = volume
-    prompt = "⏳ چند روز اعتبار داشته باشه؟ (فقط عدد)"
-    if screen_id:
-        try:
-            bot.edit_message_text(prompt, chat_id, screen_id, reply_markup=kb)
-        except Exception:
-            cc.show(chat_id, prompt, reply_markup=kb)
-    else:
-        cc.show(chat_id, prompt, reply_markup=kb)
+    _edit_screen(chat_id, "⏳ چند روز اعتبار داشته باشه؟ (فقط عدد)", kb)
     bot.register_next_step_handler_by_chat_id(chat_id, resnew_duration, pool_id)
 
 
@@ -986,30 +1028,15 @@ def resnew_duration(message, pool_id):
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-    screen_id = cc.get_screen(chat_id)
 
     text = (message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        err = "❌ فقط عدد روز (بزرگ‌تر از صفر) بفرست:"
-        if screen_id:
-            try:
-                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, err, reply_markup=kb)
-        else:
-            cc.show(chat_id, err, reply_markup=kb)
+    if not text.isdigit() or int(text) <= 0 or int(text) > 3650:
+        _edit_screen(chat_id, "❌ فقط عدد روز (بین ۱ تا ۳۶۵۰) بفرست:", kb)
         bot.register_next_step_handler_by_chat_id(chat_id, resnew_duration, pool_id)
         return
 
     draft["duration"] = int(text)
-    prompt = "📱 چند تا دستگاه همزمان مجاز باشه؟ (فقط عدد)"
-    if screen_id:
-        try:
-            bot.edit_message_text(prompt, chat_id, screen_id, reply_markup=kb)
-        except Exception:
-            cc.show(chat_id, prompt, reply_markup=kb)
-    else:
-        cc.show(chat_id, prompt, reply_markup=kb)
+    _edit_screen(chat_id, "📱 چند تا دستگاه همزمان مجاز باشه؟ (فقط عدد)", kb)
     bot.register_next_step_handler_by_chat_id(chat_id, resnew_devices, pool_id)
 
 
@@ -1022,20 +1049,13 @@ def resnew_devices(message, pool_id):
 
     user_id = internal_user_id(message.from_user.id)
     pool = _get_pool(pool_id, user_id)
+
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"respool:{pool_id}"))
-    screen_id = cc.get_screen(chat_id)
 
     text = (message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        err = "❌ فقط عدد بزرگ‌تر از صفر بفرست:"
-        if screen_id:
-            try:
-                bot.edit_message_text(err, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, err, reply_markup=kb)
-        else:
-            cc.show(chat_id, err, reply_markup=kb)
+    if not text.isdigit() or int(text) <= 0 or int(text) > 100:
+        _edit_screen(chat_id, "❌ فقط عدد بزرگ‌تر از صفر (حداکثر ۱۰۰) بفرست:", kb)
         bot.register_next_step_handler_by_chat_id(chat_id, resnew_devices, pool_id)
         return
 
@@ -1053,111 +1073,115 @@ def resnew_devices(message, pool_id):
         types.InlineKeyboardButton("❌ انصراف", callback_data=f"respool:{pool_id}"),
     )
 
-    text2 = (
+    _edit_screen(
+        chat_id,
         "🔎 <b>مشخصات سرویس مشتری</b>\n\n"
         f"🏷 استخر: {_pool_label(pool)}\n"
         f"👤 نام کاربری: <code>{final_username}</code>\n"
         f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ\n"
         f"⏳ مدت: {draft['duration']} روز\n"
         f"📱 دستگاه: {draft['devices']}\n\n"
-        "مصرف واقعی این مشتری از استخرت کم میشه. تایید می‌کنی؟"
+        "مصرف واقعی این مشتری از استخرت کم میشه. تایید می‌کنی؟",
+        kb2
     )
-    if screen_id:
-        try:
-            bot.edit_message_text(text2, chat_id, screen_id, reply_markup=kb2, parse_mode="HTML")
-            return
-        except Exception:
-            pass
-    cc.show(chat_id, text2, reply_markup=kb2, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "resmk_confirm")
 def resnew_confirm(call):
     chat_id = call.message.chat.id
-    draft = _draft.get(chat_id)
+
+    # pop اتمیک: دابل‌کلیک فقط یک بار از این‌جا رد میشه
+    draft = _draft.pop(chat_id, None)
     if not draft:
-        bot.answer_callback_query(call.id, "⛔ این مرحله منقضی شده، دوباره از اول بزن.", show_alert=True)
+        bot.answer_callback_query(call.id, "⛔ این مرحله منقضی شده یا قبلاً ثبت شده.", show_alert=True)
         return
 
-    pool_id = draft["pool_id"]
-    user_id = internal_user_id(call.from_user.id)
-    pool = _get_pool(pool_id, user_id)
-
-    if not pool or (pool["balance"] or 0) <= 0:
-        _draft.pop(chat_id, None)
-        bot.answer_callback_query(call.id, "این استخر دیگه موجودی نداره.", show_alert=True)
-        return
-
-    panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
-    if not panel:
-        bot.answer_callback_query(call.id, "پنل این استخر پیدا نشد.", show_alert=True)
-        return
-
-    final_username = _sanitize_customer_name(user_id, draft["raw"])
-    if db_execute("SELECT id FROM services WHERE username=?", (final_username,), fetchone=True):
-        _draft.pop(chat_id, None)
-        bot.answer_callback_query(call.id, "این نام همین الان گرفته شد، از اول با یه نام دیگه امتحان کن.", show_alert=True)
-        return
-
-    bot.answer_callback_query(call.id, "⏳ در حال ساخت سرویس...")
     try:
-        bot.edit_message_text("⏳ در حال ساخت سرویس...", chat_id, call.message.message_id)
-    except Exception:
-        pass
+        pool_id = draft["pool_id"]
+        user_id = internal_user_id(call.from_user.id)
+        pool = _get_pool(pool_id, user_id)
 
-    fake_plan = {
-        "name": f"Reseller:{pool_id}",
-        "price": 0,
-        "volume": draft["volume"],
-        "duration": draft["duration"],
-        "devices": draft["devices"],
-    }
-    owner = {"telegram_id": f"reseller{user_id}"}
+        if not pool or (pool["balance"] or 0) <= 0:
+            bot.answer_callback_query(call.id, "این استخر دیگه موجودی نداره.", show_alert=True)
+            return
 
-    result = pasarguard_create_service(
-        panel=panel,
-        telegram_user=owner,
-        plan=fake_plan,
-        desired_username=final_username
-    )
+        if draft["volume"] > (pool["balance"] or 0):
+            bot.answer_callback_query(call.id, "حجم از موجودی استخر بیشتره.", show_alert=True)
+            return
 
-    kb_back = types.InlineKeyboardMarkup()
-    kb_back.add(types.InlineKeyboardButton("🔙 بازگشت به استخر", callback_data=f"respool:{pool_id}"))
+        panel = db_execute("SELECT * FROM panels WHERE id=?", (pool["panel_id"],), fetchone=True)
+        if not panel:
+            bot.answer_callback_query(call.id, "پنل این استخر پیدا نشد.", show_alert=True)
+            return
 
-    if not result.get("success"):
+        final_username = _sanitize_customer_name(user_id, draft["raw"])
+        if db_execute("SELECT id FROM services WHERE username=?", (final_username,), fetchone=True):
+            bot.answer_callback_query(call.id, "این نام همین الان گرفته شد، از اول با یه نام دیگه امتحان کن.", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id, "⏳ در حال ساخت سرویس...")
+        try:
+            bot.edit_message_text("⏳ در حال ساخت سرویس...", chat_id, call.message.message_id)
+        except Exception:
+            pass
+
+        fake_plan = {
+            "name": f"Reseller:{pool_id}",
+            "price": 0,
+            "volume": draft["volume"],
+            "duration": draft["duration"],
+            "devices": draft["devices"],
+        }
+        owner = {"telegram_id": f"reseller{user_id}"}
+
+        result = pasarguard_create_service(
+            panel=panel,
+            telegram_user=owner,
+            plan=fake_plan,
+            desired_username=final_username
+        )
+
+        kb_back = types.InlineKeyboardMarkup()
+        kb_back.add(types.InlineKeyboardButton("🔙 بازگشت به استخر", callback_data=f"respool:{pool_id}"))
+
+        if not result.get("success"):
+            render(
+                chat_id,
+                f"❌ ساخت سرویس ناموفق بود.\n\n<code>{result.get('error', 'نامشخص')}</code>",
+                kb_back, call.message.message_id
+            )
+            return
+
+        expires_at = (datetime.utcnow() + timedelta(days=draft["duration"])).strftime("%Y-%m-%d %H:%M:%S")
+        link = result.get("config", "")
+        created_username = result.get("username", final_username)
+
+        db_execute("""
+        INSERT INTO services
+        (user_id, plan_id, panel_id, username, config, qr,
+         volume, used_volume, duration, devices,
+         expires_at, status, reseller_id, is_unlimited,
+         created_at, updated_at)
+        VALUES (?, NULL, ?, ?, ?, '', ?, 0, ?, ?, ?, 'active', ?, 0, ?, ?)
+        """, (
+            user_id, pool["panel_id"], created_username,
+            link, draft["volume"], draft["duration"], draft["devices"],
+            expires_at, user_id, now(), now()
+        ))
+
         render(
             chat_id,
-            f"❌ ساخت سرویس ناموفق بود.\n\n<code>{result.get('error', 'نامشخص')}</code>",
+            "🎉 <b>سرویس مشتری ساخته شد!</b>\n\n"
+            f"👤 نام کاربری: <code>{created_username}</code>\n"
+            f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ | ⏳ {draft['duration']} روز | 📱 {draft['devices']} دستگاه\n\n"
+            f"🔗 لینک اشتراک (این رو به مشتریت بده):\n<code>{link or '---'}</code>",
             kb_back, call.message.message_id
         )
-        _draft.pop(chat_id, None)
-        return
 
-    expires_at = (datetime.utcnow() + timedelta(days=draft["duration"])).strftime("%Y-%m-%d %H:%M:%S")
-
-    db_execute("""
-    INSERT INTO services
-    (user_id, plan_id, panel_id, username, config, qr,
-     volume, used_volume, duration, devices,
-     expires_at, status, reseller_id, is_unlimited,
-     created_at, updated_at)
-    VALUES (?, NULL, ?, ?, ?, '', ?, 0, ?, ?, ?, 'active', ?, 0, ?, ?)
-    """, (
-        user_id, pool["panel_id"], result.get("username", final_username),
-        result.get("config", ""), draft["volume"], draft["duration"], draft["devices"],
-        expires_at, user_id, now(), now()
-    ))
-
-    _draft.pop(chat_id, None)
-
-    render(
-        chat_id,
-        "🎉 <b>سرویس مشتری ساخته شد!</b>\n\n"
-        f"👤 نام کاربری: <code>{result.get('username', final_username)}</code>\n"
-        f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ | ⏳ {draft['duration']} روز | 📱 {draft['devices']} دستگاه\n\n"
-        f"🔗 لینک اشتراک (این رو به مشتریت بده):\n<code>{result.get('config', '---')}</code>",
-        kb_back, call.message.message_id
-    )
+        if link:
+            _send_qr(chat_id, link, created_username)
+    except Exception as e:
+        _report_error(call, "ساخت سرویس", e)
 
 
 # ============================================================
@@ -1229,11 +1253,12 @@ def _render_customer_detail(chat_id, service_id, owner_user_id, message_id=None,
     kb = types.InlineKeyboardMarkup()
     kb.row(
         types.InlineKeyboardButton("🔄 بروزرسانی مصرف", callback_data=f"rescustrefresh:{service_id}:{back_cb}"),
+        types.InlineKeyboardButton("📱 QR کد", callback_data=f"resqr:{service_id}"),
     )
     if svc["status"] == "active":
-        kb.add(types.InlineKeyboardButton("⏸ غیرفعال کردن دستی", callback_data=f"respause:{service_id}"))
+        kb.add(types.InlineKeyboardButton("⏸ غیرفعال کردن دستی", callback_data=f"respause:{service_id}:{back_cb}"))
     else:
-        kb.add(types.InlineKeyboardButton("▶️ فعال کردن دوباره", callback_data=f"resresume:{service_id}"))
+        kb.add(types.InlineKeyboardButton("▶️ فعال کردن دوباره", callback_data=f"resresume:{service_id}:{back_cb}"))
     kb.add(types.InlineKeyboardButton("🗑 حذف سرویس", callback_data=f"resdel_ask:{service_id}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=back_cb))
 
@@ -1253,34 +1278,55 @@ def _render_customer_detail(chat_id, service_id, owner_user_id, message_id=None,
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rescust:"))
 def rescust_detail(call):
-    parts = call.data.split(":", 2)
-    service_id = int(parts[1])
-    back_cb = parts[2] if len(parts) > 2 else "res_customers"
+    try:
+        parts = call.data.split(":", 2)
+        service_id = int(parts[1])
+        back_cb = parts[2] if len(parts) > 2 else "res_customers"
+        user_id = internal_user_id(call.from_user.id)
+        bot.answer_callback_query(call.id)
+        _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+    except Exception as e:
+        _report_error(call, "جزئیات مشتری", e)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("resqr:"))
+def res_qr(call):
+    service_id = int(call.data.split(":")[1])
     user_id = internal_user_id(call.from_user.id)
+    svc = db_execute(
+        "SELECT * FROM services WHERE id=? AND reseller_id=?",
+        (service_id, user_id), fetchone=True
+    )
+    if not svc or not svc["config"]:
+        bot.answer_callback_query(call.id, "لینکی برای این سرویس ثبت نشده.", show_alert=True)
+        return
     bot.answer_callback_query(call.id)
-    _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+    _send_qr(call.message.chat.id, svc["config"], svc["username"])
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rescustrefresh:"))
 def rescust_refresh(call):
-    _, service_id, back_cb = call.data.split(":", 2)
-    service_id = int(service_id)
-    user_id = internal_user_id(call.from_user.id)
-
-    svc = db_execute(
-        "SELECT id FROM services WHERE id=? AND reseller_id=?",
-        (service_id, user_id), fetchone=True
-    )
-    if not svc:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
-
-    bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی...")
     try:
-        reseller_billing.refresh_service(service_id)
-    except Exception:
-        pass
-    _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+        _, service_id, back_cb = call.data.split(":", 2)
+        service_id = int(service_id)
+        user_id = internal_user_id(call.from_user.id)
+
+        svc = db_execute(
+            "SELECT id FROM services WHERE id=? AND reseller_id=?",
+            (service_id, user_id), fetchone=True
+        )
+        if not svc:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id, "⏳ در حال بروزرسانی...")
+        try:
+            reseller_billing.refresh_service(service_id)
+        except Exception:
+            traceback.print_exc()
+        _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+    except Exception as e:
+        _report_error(call, "بروزرسانی مشتری", e)
 
 
 def _svc_panel(svc):
@@ -1289,52 +1335,69 @@ def _svc_panel(svc):
     return db_execute("SELECT * FROM panels WHERE id=?", (svc["panel_id"],), fetchone=True)
 
 
+def _split_cb(data):
+    """callback به شکل  action:service_id[:back_cb]"""
+    parts = data.split(":", 2)
+    service_id = int(parts[1])
+    back_cb = parts[2] if len(parts) > 2 else "res_customers"
+    return service_id, back_cb
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("respause:"))
 def respause(call):
-    service_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
-    if not svc:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+    try:
+        service_id, back_cb = _split_cb(call.data)
+        user_id = internal_user_id(call.from_user.id)
+        svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
+        if not svc:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    panel = _svc_panel(svc)
-    if panel and svc["username"]:
-        pasarguard_set_status(panel, svc["username"], enabled=False)
+        panel = _svc_panel(svc)
+        if panel and svc["username"]:
+            result = pasarguard_set_status(panel, svc["username"], enabled=False)
+            if not result.get("success"):
+                bot.answer_callback_query(call.id, f"خطای پنل: {result.get('error')}", show_alert=True)
+                return
 
-    db_execute("UPDATE services SET status='disabled', updated_at=? WHERE id=?", (now(), service_id))
-    bot.answer_callback_query(call.id, "⏸ غیرفعال شد.")
-    rescust_detail(call)
+        db_execute("UPDATE services SET status='disabled', updated_at=? WHERE id=?", (now(), service_id))
+        bot.answer_callback_query(call.id, "⏸ غیرفعال شد.")
+        _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+    except Exception as e:
+        _report_error(call, "غیرفعال کردن", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resresume:"))
 def resresume(call):
-    service_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
-    if not svc:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
-
-    pool = db_execute(
-        "SELECT * FROM reseller_panels WHERE user_id=? AND panel_id=?",
-        (user_id, svc["panel_id"]), fetchone=True
-    )
-    if not pool or (pool["balance"] or 0) <= 0:
-        bot.answer_callback_query(call.id, "❌ استخر این پنل موجودی نداره، اول شارژ کن.", show_alert=True)
-        return
-
-    panel = _svc_panel(svc)
-    if panel and svc["username"]:
-        result = pasarguard_set_status(panel, svc["username"], enabled=True)
-        if not result.get("success"):
-            bot.answer_callback_query(call.id, f"خطا: {result.get('error')}", show_alert=True)
+    try:
+        service_id, back_cb = _split_cb(call.data)
+        user_id = internal_user_id(call.from_user.id)
+        svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
+        if not svc:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
             return
 
-    db_execute("UPDATE services SET status='active', updated_at=? WHERE id=?", (now(), service_id))
-    db_execute("UPDATE reseller_panels SET active=1 WHERE id=?", (pool["id"],))
-    bot.answer_callback_query(call.id, "▶️ دوباره فعال شد.")
-    rescust_detail(call)
+        pool = db_execute(
+            "SELECT * FROM reseller_panels WHERE user_id=? AND panel_id=?",
+            (user_id, svc["panel_id"]), fetchone=True
+        )
+        if not pool or (pool["balance"] or 0) <= 0:
+            bot.answer_callback_query(call.id, "❌ استخر این پنل موجودی نداره، اول شارژ کن.", show_alert=True)
+            return
+
+        panel = _svc_panel(svc)
+        if panel and svc["username"]:
+            result = pasarguard_set_status(panel, svc["username"], enabled=True)
+            if not result.get("success"):
+                bot.answer_callback_query(call.id, f"خطا: {result.get('error')}", show_alert=True)
+                return
+
+        db_execute("UPDATE services SET status='active', updated_at=? WHERE id=?", (now(), service_id))
+        db_execute("UPDATE reseller_panels SET active=1 WHERE id=?", (pool["id"],))
+        bot.answer_callback_query(call.id, "▶️ دوباره فعال شد.")
+        _render_customer_detail(call.message.chat.id, service_id, user_id, call.message.message_id, back_cb)
+    except Exception as e:
+        _report_error(call, "فعال کردن", e)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resdel_ask:"))
@@ -1355,26 +1418,36 @@ def resdel_ask(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resdel_go:"))
 def resdel_go(call):
-    service_id = int(call.data.split(":")[1])
-    user_id = internal_user_id(call.from_user.id)
-    svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
-    if not svc:
-        bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
-        return
+    try:
+        service_id = int(call.data.split(":")[1])
+        user_id = internal_user_id(call.from_user.id)
+        svc = db_execute("SELECT * FROM services WHERE id=? AND reseller_id=?", (service_id, user_id), fetchone=True)
+        if not svc:
+            bot.answer_callback_query(call.id, "پیدا نشد.", show_alert=True)
+            return
 
-    panel = _svc_panel(svc)
-    warning = ""
-    if panel and svc["username"]:
-        result = pasarguard_delete_service(panel, svc["username"])
-        if not result.get("success"):
-            warning = f"\n\n⚠️ حذف از پنل انجام نشد: {result.get('error')}"
+        kb = types.InlineKeyboardMarkup()
+        panel = _svc_panel(svc)
+        if panel and svc["username"]:
+            result = pasarguard_delete_service(panel, svc["username"])
+            if not result.get("success"):
+                # سرویس از دیتابیس پاک نمیشه تا یتیم تو پنل نمونه
+                bot.answer_callback_query(call.id, "خطا", show_alert=False)
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"rescust:{service_id}"))
+                render(
+                    call.message.chat.id,
+                    f"❌ حذف از پنل انجام نشد، سرویس دست‌نخورده موند.\n\n<code>{result.get('error')}</code>",
+                    kb, call.message.message_id
+                )
+                return
 
-    db_execute("DELETE FROM services WHERE id=?", (service_id,))
-    bot.answer_callback_query(call.id, "🗑 حذف شد.")
+        db_execute("DELETE FROM services WHERE id=?", (service_id,))
+        bot.answer_callback_query(call.id, "🗑 حذف شد.")
 
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="res_customers"))
-    render(call.message.chat.id, f"✅ سرویس حذف شد.{warning}", kb, call.message.message_id)
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="res_customers"))
+        render(call.message.chat.id, "✅ سرویس حذف شد.", kb, call.message.message_id)
+    except Exception as e:
+        _report_error(call, "حذف سرویس", e)
 
 
 # ============================================================
