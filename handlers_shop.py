@@ -49,6 +49,30 @@ def _screen(chat_id, text, kb, message_id=None):
     return sent.message_id if sent else None
 
 
+_menu_ready = set()  # چت‌هایی که پیام حامل کیبورد منو براشون ساخته شده
+
+
+def _ensure_menu_keyboard(chat_id, telegram_id):
+    """
+    مطمئن میشه پیام حامل کیبورد منو (با کلید جدا، user_menu) تو چت هست.
+    تلگرام کیبورد پایین رو به همین پیام وصل می‌کنه؛ چون با کلید جدا ثبت
+    میشه، صفحه‌های بعدی (خرید، سرویس‌های من و...) پاکش نمی‌کنن.
+    فقط یک بار برای هر چت (تا ریستارت بعدی بات) ساخته میشه.
+    """
+    if chat_id in _menu_ready:
+        return
+    try:
+        cc.show(
+            chat_id,
+            "🏠 منوی اصلی",
+            key="user_menu",
+            reply_markup=user_keyboard(is_super_admin=is_superadmin(telegram_id))
+        )
+        _menu_ready.add(chat_id)
+    except Exception:
+        pass
+
+
 # ============================================================
 # STEP 1: PANEL LIST — تنها جایی که دکمه «منوی اصلی» دارد
 # ============================================================
@@ -89,6 +113,7 @@ def buy_vpn(message):
             reply_markup=force_join_markup()
         )
         return
+    _ensure_menu_keyboard(message.chat.id, message.from_user.id)
     show_panels(message.chat.id)
 
 
@@ -459,6 +484,7 @@ def _no_service_markup():
 @bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
 def my_services(message):
     cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    _ensure_menu_keyboard(message.chat.id, message.from_user.id)
     services = _get_user_services(message.from_user.id)
 
     if not services:
@@ -517,9 +543,12 @@ def go_home(call):
     bot.clear_step_handler_by_chat_id(call.message.chat.id)
     _buy_screen.pop(call.message.chat.id, None)
 
-    # اگه این پیام یه «صفحه‌ی منو/مرحله» بود، پایین با نمایش منوی اصلی پاک میشه.
+    # اگه این پیام یه «صفحه‌ی منو/مرحله» بود، همینجا پاک میشه.
     # اگه پیام دیگه‌ای بود (مثلاً کانفیگ یا رسید)، پاک نمیشه و فقط دکمه‌هاش برداشته میشه.
-    if not cc.is_screen(call.message.chat.id, call.message.message_id):
+    if cc.is_screen(call.message.chat.id, call.message.message_id):
+        cc.drop_screen(call.message.chat.id)
+        cc.safe_delete(call.message.chat.id, call.message.message_id)
+    else:
         try:
             bot.edit_message_reply_markup(
                 call.message.chat.id,
@@ -529,13 +558,18 @@ def go_home(call):
         except Exception:
             pass
 
+    # پیامِ حامل کیبورد منو با کلید جدا (user_menu) ثبت میشه تا صفحه‌های
+    # بعدی (لیست سرویس‌ها، خرید و...) پاکش نکنن؛ تلگرام کیبورد پایین رو به
+    # همین پیام وصل می‌کنه و اگه پاک بشه، کیبورد هم ناپدید میشه.
     cc.show(
         call.message.chat.id,
         "🏠 بازگشت به منوی اصلی",
+        key="user_menu",
         reply_markup=user_keyboard(
             is_super_admin=is_superadmin(call.from_user.id)
         )
     )
+    _menu_ready.add(call.message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "services_home_back")
