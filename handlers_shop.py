@@ -17,7 +17,11 @@ from database import db_execute, get_setting
 from models import internal_user_id, get_user, is_superadmin
 from force_join import force_join_ok, MENU_SHORTCUTS
 from keyboards import force_join_markup, user_keyboard
-from pasarguard_api import pasarguard_get_user_usage, pasarguard_delete_service
+from pasarguard_api import (
+    pasarguard_get_user_usage,
+    pasarguard_delete_service,
+    pasarguard_username_exists,
+)
 import chat_clean as cc
 
 USERNAME_PREFIX = "virangarvpn."
@@ -328,6 +332,30 @@ def receive_username(message, plan_id):
             _buy_screen[chat_id] = new_id
         bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
         return
+
+    # ---- جدید: چک وجود نام روی خود پنل (جلوگیری از خطای 409) ----
+    panel = db_execute(
+        "SELECT * FROM panels WHERE id=? AND active=1",
+        (plan["panel_id"],),
+        fetchone=True
+    )
+    if panel:
+        check = pasarguard_username_exists(panel, username)
+        if check.get("success") and check.get("exists"):
+            new_id = _screen(
+                chat_id,
+                _plan_prompt_text(
+                    plan,
+                    error="❌ <b>این نام کاربری قبلاً ثبت شده است.</b> "
+                          "یک نام دیگر انتخاب کنید:"
+                ),
+                kb, screen_id
+            )
+            if new_id:
+                _buy_screen[chat_id] = new_id
+            bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
+            return
+    # ---------------------------------------------------------------
 
     show_payment_methods(chat_id, message.from_user.id, plan, username, screen_id)
 
