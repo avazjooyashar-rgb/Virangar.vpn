@@ -1,17 +1,24 @@
 # ============================================================
-# handlers_reseller.py  [نسخه‌ی اصلاح‌شده v2]
+# handlers_reseller.py  [نسخه‌ی v3]
 # پنل نمایندگی از دید کاربر:
 #   - خرید حجم نمایندگی (کارت به کارت، نیاز به تأیید ادمین)
 #   - پنل‌های من = استخرهای حجمی که در هر پنل داره
 #   - ساخت سرویس برای مشتری (نام / حجم / مدت / دستگاه + QR کد)
 #   - کاربران من = لیست سرویس‌هایی که برای مشتری‌هاش ساخته
 #
+# تغییرات v3:
+#   - ورود به «پنل نمایندگی» کیبورد منوی کاربر رو دوباره تثبیت می‌کنه
+#     (پیام حامل کیبورد با کلید جدا user_menu ثبت میشه و پاک نمیشه)
+#   - بعد از ساخت سرویس مشتری، همه‌چیز تو «یک پیام» میاد:
+#     QR کد بالا، و زیرش مشخصات سرویس + لینک اشتراک
+#   - دکمه‌ی «QR کد» تو جزئیات مشتری هم QR + لینک رو تو یک پیام می‌فرسته
+#
 # نکته‌ی طراحی: «مشتریِ نماینده» یک کاربر تلگرامی جدا نیست.
 # سرویس زیر حساب خودِ نماینده ثبت میشه (reseller_id = خودِ نماینده).
 # کم شدن از استخر «قطره‌ای» و بر اساس مصرف واقعی انجام میشه
 # (کارش با reseller_billing هست، نه این فایل).
 #
-# نیازمندی جدید:  pip install "qrcode[pil]"
+# نیازمندی:  pip install "qrcode[pil]"
 # ============================================================
 
 import io
@@ -19,13 +26,14 @@ import math
 import re
 import traceback
 from datetime import datetime, timedelta
+from html import escape as _esc
 
-import qrcode
 from telebot import types
 
 from config import bot
 from database import db_execute, get_setting, now
-from models import get_user, internal_user_id
+from models import get_user, internal_user_id, is_superadmin
+from keyboards import user_keyboard
 from pasarguard_api import (
     pasarguard_create_service,
     pasarguard_set_status,
@@ -34,6 +42,11 @@ from pasarguard_api import (
 )
 import chat_clean as cc
 import reseller_billing
+
+try:
+    import qrcode
+except ImportError:  # اگه نصب نبود، لینک فقط به‌صورت متن فرستاده میشه
+    qrcode = None
 
 # فلوی چندمرحله‌ایِ «ساخت سرویس برای مشتری»
 _draft = {}  # chat_id -> dict
@@ -73,6 +86,24 @@ def _home_markup():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
     return kb
+
+
+def _ensure_menu_keyboard(chat_id, telegram_id):
+    """
+    کیبورد منوی کاربر رو تثبیت می‌کنه. تلگرام کیبورد پایین رو به پیامی
+    وصل می‌کنه که فرستاده؛ اگه اون پیام پاک بشه کیبورد هم ناپدید میشه.
+    برای همین پیام حامل با کلید جدا (user_menu) ثبت میشه تا صفحه‌های
+    پنل نمایندگی پاکش نکنن، و هر بار جای قبلی رو می‌گیره (پیام تکراری نمیشه).
+    """
+    try:
+        cc.show(
+            chat_id,
+            "🤝",
+            key="user_menu",
+            reply_markup=user_keyboard(is_super_admin=is_superadmin(telegram_id))
+        )
+    except Exception:
+        traceback.print_exc()
 
 
 def _get_pool(pool_id, owner_user_id):
@@ -120,16 +151,50 @@ def _fmt_gb(value):
     return f"{value:.2f}"
 
 
-def _send_qr(chat_id, link, username):
-    """QR کد لینک اشتراک رو به‌صورت عکس می‌فرسته."""
+def _qr_bio(link):
+    if not qrcode or not link:
+        return None
     try:
         img = qrcode.make(link)
         bio = io.BytesIO()
         img.save(bio, format="PNG")
         bio.seek(0)
-        bot.send_photo(chat_id, bio, caption=f"📱 QR کد اشتراک — {username}")
+        return bio
     except Exception:
         traceback.print_exc()
+        return None
+
+
+def _send_qr_message(chat_id, link, caption, kb=None):
+    """
+    یک پیام واحد: QR کد بالا، و کپشن (مشخصات + لینک اشتراک) زیرش.
+    اگه کپشن از حد تلگرام (۱۰۲۴ کاراکتر) بلندتر بشه، QR و بعدش متن
+    جدا فرستاده میشه (همچنان QR بالا و لینک پایین).
+    """
+    bio = _qr_bio(link)
+    if bio:
+        try:
+            if len(caption) <= 1000:
+                bot.send_photo(
+                    chat_id, bio, caption=caption,
+                    parse_mode="HTML", reply_markup=kb
+                )
+                return True
+            bot.send_photo(chat_id, bio)
+        except Exception:
+            traceback.print_exc()
+    bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=kb)
+    return False
+
+
+def _send_qr(chat_id, link, username):
+    """QR کد + لینک اشتراک یک سرویس (QR بالا، لینک پایین، یک پیام)."""
+    caption = (
+        f"📱 <b>QR کد اشتراک</b> — <code>{_esc(str(username))}</code>\n\n"
+        "🔗 لینک اشتراک:\n"
+        f"<code>{_esc(link)}</code>"
+    )
+    _send_qr_message(chat_id, link, caption)
 
 
 # ============================================================
@@ -156,6 +221,8 @@ _MENU_TEXT = (
 def reseller_menu(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
     cc.drop(message)
+    # کیبورد منو همیشه دوباره تثبیت میشه تا تو پنل نمایندگی ناپدید نشه
+    _ensure_menu_keyboard(message.chat.id, message.from_user.id)
     cc.show(message.chat.id, _MENU_TEXT, reply_markup=_reseller_menu_markup(), parse_mode="HTML")
 
 
@@ -494,7 +561,8 @@ def apply_reseller_topup(payment):
                 user["telegram_id"],
                 "✅ <b>خرید حجم نمایندگی تأیید شد!</b>\n\n"
                 f"➕ {_fmt_gb(volume)} گیگ به استخر «{rplan['name']}» اضافه شد.",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=_home_markup()
             )
         except Exception:
             pass
@@ -910,7 +978,7 @@ def respool_customers(call):
 
 # ============================================================
 # CREATE CUSTOMER SERVICE  (ساخت کانفیگ)
-# نام → حجم → مدت → دستگاه → تأیید → ساخت + لینک + QR
+# نام → حجم → مدت → دستگاه → تأیید → ساخت + (QR + مشخصات + لینک) تو یک پیام
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("resnew:"))
@@ -1169,17 +1237,26 @@ def resnew_confirm(call):
             expires_at, user_id, now(), now()
         ))
 
-        render(
-            chat_id,
-            "🎉 <b>سرویس مشتری ساخته شد!</b>\n\n"
-            f"👤 نام کاربری: <code>{created_username}</code>\n"
-            f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ | ⏳ {draft['duration']} روز | 📱 {draft['devices']} دستگاه\n\n"
-            f"🔗 لینک اشتراک (این رو به مشتریت بده):\n<code>{link or '---'}</code>",
-            kb_back, call.message.message_id
-        )
+        # صفحه‌ی «در حال ساخت» پاک میشه و تحویل سرویس تو «یک پیام» میاد:
+        # QR کد بالا، و زیرش مشخصات سرویس + لینک اشتراک.
+        # این پیام عمداً ثبت/پاک نمیشه تا نماینده لینک رو از دست نده.
+        cc.drop_screen(chat_id)
+        cc.safe_delete(chat_id, call.message.message_id)
 
-        if link:
-            _send_qr(chat_id, link, created_username)
+        caption = (
+            "🎉 <b>سرویس مشتری ساخته شد!</b>\n\n"
+            f"👤 نام کاربری: <code>{_esc(str(created_username))}</code>\n"
+            f"📊 حجم: {_fmt_gb(draft['volume'])} گیگ\n"
+            f"⏳ مدت: {draft['duration']} روز\n"
+            f"📱 دستگاه: {draft['devices']}\n\n"
+            "🔗 لینک اشتراک (این رو به مشتریت بده):\n"
+            f"<code>{_esc(link) if link else '---'}</code>"
+        )
+        kb_done = types.InlineKeyboardMarkup()
+        kb_done.add(types.InlineKeyboardButton("🔙 بازگشت به استخر", callback_data=f"respool:{pool_id}"))
+        kb_done.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
+
+        _send_qr_message(chat_id, link, caption, kb_done)
     except Exception as e:
         _report_error(call, "ساخت سرویس", e)
 
