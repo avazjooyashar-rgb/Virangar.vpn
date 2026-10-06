@@ -334,6 +334,36 @@ async def _set_status_async(panel, username, enabled):
         return {"success": True, "error": ""}
 
 
+async def _username_exists_async(panel, username):
+    """
+    چک می‌کنه این username روی پنل وجود داره یا نه.
+    وجود داشته باشه -> exists=True
+    404 / not found -> exists=False
+    هر خطای دیگه -> success=False (تا خرید قفل نشه)
+    """
+    base_url = _normalize_url(panel["url"])
+    async with PasarguardAPI(
+        base_url=base_url,
+        verify=VERIFY_SSL,
+        timeout=REQUEST_TIMEOUT,
+    ) as api:
+        token = await api.get_token(
+            username=panel["username"],
+            password=panel["password"],
+        )
+        try:
+            await api.get_user_by_username(
+                username=username,
+                token=token.access_token,
+            )
+            return {"success": True, "exists": True, "error": ""}
+        except Exception as e:
+            msg = str(e).lower()
+            if "404" in msg or "not found" in msg:
+                return {"success": True, "exists": False, "error": ""}
+            return {"success": False, "exists": False, "error": str(e)}
+
+
 async def _delete_service_async(panel, username):
     """
     حذف کامل کاربر از روی پنل.
@@ -425,6 +455,13 @@ def pasarguard_set_status(panel, username, enabled):
     if not _panel_credentials_ok(panel) or not username:
         return {"success": False, "error": "اطلاعات پنل یا نام کاربری ناقص است."}
     return _run_with_hard_timeout(_set_status_async, panel, username, enabled)
+
+
+def pasarguard_username_exists(panel, username):
+    panel = dict(panel)
+    if not _panel_credentials_ok(panel) or not username:
+        return {"success": False, "exists": False, "error": "اطلاعات ناقص است."}
+    return _run_with_hard_timeout(_username_exists_async, panel, username)
 
 
 def pasarguard_delete_service(panel, username):
