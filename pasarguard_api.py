@@ -336,32 +336,38 @@ async def _set_status_async(panel, username, enabled):
 
 async def _username_exists_async(panel, username):
     """
-    چک می‌کنه این username روی پنل وجود داره یا نه.
-    وجود داشته باشه -> exists=True
-    404 / not found -> exists=False
-    هر خطای دیگه -> success=False (تا خرید قفل نشه)
+    چک مستقیم با API پنل (بدون وابستگی به رفتار SDK):
+    200 -> کاربر هست (exists=True)
+    404 -> کاربر نیست (exists=False)
+    هر چیز دیگه -> success=False
     """
+    import httpx
+
     base_url = _normalize_url(panel["url"])
-    async with PasarguardAPI(
-        base_url=base_url,
-        verify=VERIFY_SSL,
-        timeout=REQUEST_TIMEOUT,
-    ) as api:
-        token = await api.get_token(
-            username=panel["username"],
-            password=panel["password"],
+    async with httpx.AsyncClient(
+        base_url=base_url, verify=VERIFY_SSL, timeout=REQUEST_TIMEOUT
+    ) as client:
+        # گرفتن توکن
+        r = await client.post(
+            "/api/admin/token",
+            data={"username": panel["username"], "password": panel["password"]},
         )
-        try:
-            await api.get_user_by_username(
-                username=username,
-                token=token.access_token,
-            )
+        if r.status_code != 200:
+            return {"success": False, "exists": False,
+                    "error": f"login failed: {r.status_code}"}
+        access = r.json().get("access_token")
+
+        # چک کاربر
+        r = await client.get(
+            f"/api/user/{username}",
+            headers={"Authorization": f"Bearer {access}"},
+        )
+        if r.status_code == 200:
             return {"success": True, "exists": True, "error": ""}
-        except Exception as e:
-            msg = str(e).lower()
-            if "404" in msg or "not found" in msg:
-                return {"success": True, "exists": False, "error": ""}
-            return {"success": False, "exists": False, "error": str(e)}
+        if r.status_code == 404:
+            return {"success": True, "exists": False, "error": ""}
+        return {"success": False, "exists": False,
+                "error": f"status {r.status_code}: {r.text[:200]}"}
 
 
 async def _delete_service_async(panel, username):
