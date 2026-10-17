@@ -2,11 +2,15 @@
 # handlers_shop.py  [نسخه‌ی اصلاح‌شده]
 # نمایش پنل‌ها، پلن‌های هر پنل، جزئیات پلن و سرویس‌های کاربر
 #
-# تغییرات این نسخه (فقط فلوی خرید):
+# تغییرات این نسخه:
 #   - کل مسیر «پنل → پلن → نام → روش پرداخت» روی یک پیام ادیت
 #     میشه (دیگه پیام حذف/ارسال دوباره نداریم، صفحه نمی‌پره)
 #   - پیام خطای نام هم روی همون صفحه نشون داده میشه
 #   - کیبورد منوی کاربر دست‌نخورده می‌مونه (مخفی نمیشه)
+#   - [فیکس 409] چک وجود نام روی پنل «fail-closed» شد: اگه پنل جواب
+#     نداد/خطا داد، کاربر به مرحله‌ی پرداخت نمیره و ازش خواسته میشه
+#     چند لحظه بعد دوباره تلاش کنه (قبلاً بی‌صدا رد میشد و بعد از
+#     پرداخت خطای 409 می‌گرفتیم)
 # ============================================================
 import re
 from datetime import datetime
@@ -288,21 +292,21 @@ def receive_username(message, plan_id):
         return
 
     kb = _plan_prompt_markup(plan["panel_id"])
-    raw = (message.text or "").strip().lower()
 
-    if not re.fullmatch(r"[a-z0-9_]{2,20}", raw):
-        new_id = _screen(
-            chat_id,
-            _plan_prompt_text(
-                plan,
-                error="❌ <b>نام نامعتبر است.</b> فقط حروف انگلیسی کوچک، عدد و _ "
-                      "(۲ تا ۲۰ کاراکتر). دوباره ارسال کنید:"
-            ),
-            kb, screen_id
-        )
+    def _ask_again(error):
+        """همون صفحه رو با پیام خطا نشون میده و منتظر نام جدید می‌مونه."""
+        new_id = _screen(chat_id, _plan_prompt_text(plan, error=error), kb, screen_id)
         if new_id:
             _buy_screen[chat_id] = new_id
         bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
+
+    raw = (message.text or "").strip().lower()
+
+    if not re.fullmatch(r"[a-z0-9_]{2,20}", raw):
+        _ask_again(
+            "❌ <b>نام نامعتبر است.</b> فقط حروف انگلیسی کوچک، عدد و _ "
+            "(۲ تا ۲۰ کاراکتر). دوباره ارسال کنید:"
+        )
         return
 
     username = f"{USERNAME_PREFIX}{raw}"
@@ -319,42 +323,41 @@ def receive_username(message, plan_id):
     )
 
     if existing_service or existing_pending_payment:
-        new_id = _screen(
-            chat_id,
-            _plan_prompt_text(
-                plan,
-                error="❌ <b>این نام قبلاً استفاده شده</b> یا در انتظار تأیید یک "
-                      "پرداخت دیگر است. یک نام دیگر انتخاب کنید:"
-            ),
-            kb, screen_id
+        _ask_again(
+            "❌ <b>این نام قبلاً استفاده شده</b> یا در انتظار تأیید یک "
+            "پرداخت دیگر است. یک نام دیگر انتخاب کنید:"
         )
-        if new_id:
-            _buy_screen[chat_id] = new_id
-        bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
         return
 
-    # ---- جدید: چک وجود نام روی خود پنل (جلوگیری از خطای 409) ----
+    # ---- چک وجود نام روی خود پنل (جلوگیری از خطای 409) ----
+    # fail-closed: اگه نتونستیم مطمئن بشیم، جلو نمی‌ریم.
     panel = db_execute(
         "SELECT * FROM panels WHERE id=? AND active=1",
         (plan["panel_id"],),
         fetchone=True
     )
-    if panel:
+    if not panel:
+        _ask_again("❌ این پنل فعلاً در دسترس نیست. کمی بعد دوباره تلاش کنید.")
+        return
+
+    try:
         check = pasarguard_username_exists(panel, username)
-        if check.get("success") and check.get("exists"):
-            new_id = _screen(
-                chat_id,
-                _plan_prompt_text(
-                    plan,
-                    error="❌ <b>این نام کاربری قبلاً ثبت شده است.</b> "
-                          "یک نام دیگر انتخاب کنید:"
-                ),
-                kb, screen_id
-            )
-            if new_id:
-                _buy_screen[chat_id] = new_id
-            bot.register_next_step_handler_by_chat_id(chat_id, receive_username, plan_id)
-            return
+    except Exception:
+        check = {"success": False}
+
+    if not check.get("success"):
+        _ask_again(
+            "⚠️ <b>فعلاً امکان بررسی نام روی سرور نیست.</b> "
+            "چند لحظه بعد همین نام (یا نام دیگر) را دوباره ارسال کنید:"
+        )
+        return
+
+    if check.get("exists"):
+        _ask_again(
+            "❌ <b>این نام کاربری قبلاً ثبت شده است.</b> "
+            "یک نام دیگر انتخاب کنید:"
+        )
+        return
     # ---------------------------------------------------------------
 
     show_payment_methods(chat_id, message.from_user.id, plan, username, screen_id)
