@@ -311,14 +311,20 @@ def receive_username(message, plan_id):
 
     username = f"{USERNAME_PREFIX}{raw}"
 
+    # نکته‌ی مهم: pasarguard_api موقع ساخت کاربر هر کاراکتر غیر از
+    # حروف/عدد/_ (مثل نقطه) رو به _ تبدیل می‌کنه. یعنی نامِ واقعی روی پنل
+    # «virangarvpn_ali» می‌شه، نه «virangarvpn.ali». برای همین همه‌ی چک‌ها
+    # باید روی نامِ تبدیل‌شده هم انجام بشن، وگرنه نام تکراری پیدا نمی‌شه.
+    panel_username = re.sub(r"[^a-zA-Z0-9_]", "_", username).strip("_")
+
     existing_service = db_execute(
-        "SELECT id FROM services WHERE username=?",
-        (username,),
+        "SELECT id FROM services WHERE username IN (?, ?)",
+        (username, panel_username),
         fetchone=True
     )
     existing_pending_payment = db_execute(
-        "SELECT id FROM payments WHERE custom_username=? AND status='pending'",
-        (username,),
+        "SELECT id FROM payments WHERE custom_username IN (?, ?) AND status='pending'",
+        (username, panel_username),
         fetchone=True
     )
 
@@ -340,19 +346,26 @@ def receive_username(message, plan_id):
         _ask_again("❌ این پنل فعلاً در دسترس نیست. کمی بعد دوباره تلاش کنید.")
         return
 
+    # چک اول: تابع مخصوص وجود نام
     try:
-        check = pasarguard_username_exists(panel, username)
+        check = pasarguard_username_exists(panel, panel_username)
     except Exception:
-        check = {"success": False}
+        check = {}
+    exists_on_panel = bool(check.get("success") and check.get("exists"))
 
-    if not check.get("success"):
-        _ask_again(
-            "⚠️ <b>فعلاً امکان بررسی نام روی سرور نیست.</b> "
-            "چند لحظه بعد همین نام (یا نام دیگر) را دوباره ارسال کنید:"
-        )
-        return
+    # چک دوم (مستقل از تابع بالا): اگه دریافت مصرف کاربر از پنل موفق باشه
+    # یعنی این کاربر روی پنل هست. همین تابع تو «سرویس‌های من» کار می‌کنه.
+    if not exists_on_panel:
+        try:
+            usage = pasarguard_get_user_usage(panel, panel_username)
+            if usage.get("success"):
+                exists_on_panel = True
+        except Exception:
+            pass
 
-    if check.get("exists"):
+    print("USERNAME_CHECK:", username, check, "exists:", exists_on_panel, flush=True)
+
+    if exists_on_panel:
         _ask_again(
             "❌ <b>این نام کاربری قبلاً ثبت شده است.</b> "
             "یک نام دیگر انتخاب کنید:"
