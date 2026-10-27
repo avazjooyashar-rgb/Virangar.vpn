@@ -101,6 +101,15 @@ def start(message):
     # اگه از یه مرحله‌ی نیمه‌کاره‌ی پنل ادمین (broadcast/force-join) هندلری
     # روی این چت رجیستر مونده باشه، پاکش می‌کنیم تا جلوی /start رو نگیره.
     bot.clear_step_handler_by_chat_id(message.chat.id)
+
+    # ثبت دعوت (لینک ref_...) — حتماً قبل از ensure_user، چون فقط
+    # کاربرِ کاملاً جدید (که هنوز در جدول users نیست) معتبر حساب می‌شود.
+    try:
+        import handlers_referral
+        handlers_referral.capture_referral(message)
+    except Exception:
+        logging.exception("capture_referral failed")
+
     cc.drop(message)  # خود /start کاربر هم پاک بشه تا چت تمیز بمونه
     _send_start(message.chat.id, message.from_user)
 
@@ -177,3 +186,12 @@ def check_join(call):
             "❌ هنوز عضو کانال نشدی. اول عضو شو، بعد دوباره بزن.",
             show_alert=True
         )
+
+
+# ماژول رفرال (ثبت هندلرهای /myref و تأیید جایزه + job بررسی).
+# در انتها ایمپورت می‌شود تا ایمپورت دایره‌ای پیش نیاید و اگر مشکلی داشت
+# ربات اصلی از کار نیفتد.
+try:
+    import handlers_referral  # noqa: F401
+except Exception:
+    logging.exception("handlers_referral import failed")
