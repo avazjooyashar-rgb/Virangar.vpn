@@ -442,6 +442,14 @@ def trial_confirm(call):
         # سرویس حذف شود، این رکورد باقی می‌ماند و جلوی تست دوباره را می‌گیرد
         record_trial_usage(user["id"], service.get("id") if isinstance(service, dict) else None)
 
+        # فعال‌سازی رفرال: اگر این کاربر با لینک دعوت اومده باشد، حالا که
+        # تست رایگان رو واقعاً گرفته، دعوتش برای دعوت‌کننده شمرده می‌شود
+        try:
+            from handlers_referral import referral_activate
+            referral_activate(call.from_user.id, result.get("username", final_username))
+        except Exception:
+            logger.exception("referral_activate failed")
+
         # فقط بعد از موفقیت‌آمیز بودن ساخت سرویس، شمارنده‌ی روزانه افزایش پیدا می‌کند
         increment_today_trial_count()
 
