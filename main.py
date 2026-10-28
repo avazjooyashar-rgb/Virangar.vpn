@@ -35,6 +35,7 @@ import user_admin_menu          # noqa: F401  (سوییچ مستقیم سوپر 
 
 # ---------------- BACKGROUND WORKERS ----------------
 import reseller_billing         # noqa: F401  (کارگر پس‌زمینه: کم‌کردن قطره‌ای حجم نماینده‌ها)
+from auto_confirm import start_sms_server   # تأیید خودکار کارت‌به‌کارت با پیامک بانک
 
 # ---------------- FALLBACK (باید آخرین import باشد) ----------------
 import fallback                 # noqa: F401
@@ -43,6 +44,7 @@ import fallback                 # noqa: F401
 if __name__ == "__main__":
     init_db()
     reseller_billing.start()
+    start_sms_server()   # باید بعد از init_db باشد (ستون unique_amount رو می‌سازه)
 
     print("=" * 50)
     print(f"{BOT_NAME} Bot is running...")
