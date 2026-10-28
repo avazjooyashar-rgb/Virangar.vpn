@@ -1,6 +1,6 @@
 # ============================================================
-# handlers_wallet.py
-# کیف پول: نمایش موجودی، شارژ، تاریخچه تراکنش
+# handlers_wallet.py  [نسخه‌ی کامل با تایید خودکار شارژ]
+# کیف پول: نمایش موجودی، شارژ (مبلغ یکتا + تایید خودکار)، تاریخچه تراکنش
 # ============================================================
 
 from telebot import types
@@ -10,13 +10,14 @@ from database import db_execute, get_setting, now
 from models import get_user, internal_user_id
 from handlers_payment import notify_admin_payment
 from keyboards import user_keyboard
+from auto_confirm import make_unique_amount
 import chat_clean as cc
 
 
 @bot.message_handler(func=lambda m: m.text == "💰 کیف پول")
 def wallet(message):
-    bot.clear_step_handler_by_chat_id(message.chat.id)  # اگه وسط یه مرحله‌ی قبلی (مثلاً شارژ) رها شده بود
-    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    cc.drop(message)
     render_wallet_menu(message.chat.id, message.from_user.id)
 
 
@@ -37,11 +38,11 @@ def render_wallet_menu(chat_id, from_user_id, message_id=None):
 
     if message_id:
         try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="HTML")
             return
         except Exception:
             pass
-    cc.show(chat_id, text, reply_markup=kb)
+    cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "wallet:menu")
@@ -76,6 +77,17 @@ def wallet_topup(call):
     bot.register_next_step_handler_by_chat_id(chat_id, wallet_amount)
 
 
+def _show(chat_id, screen_id, text, kb):
+    """پیام صفحه‌ی فعلی رو ادیت می‌کنه؛ اگه نشد پیام جدید می‌فرسته."""
+    if screen_id:
+        try:
+            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    cc.show(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+
 def wallet_amount(message):
     chat_id = message.chat.id
     cc.drop(message)  # عددی که کاربر تایپ کرده پاک بشه
@@ -85,18 +97,11 @@ def wallet_amount(message):
     screen_id = cc.get_screen(chat_id)
 
     try:
-        amount = int(message.text.replace(",", "").replace(" ", ""))
+        amount = int((message.text or "").replace(",", "").replace(" ", ""))
         if amount <= 0:
             raise ValueError
     except ValueError:
-        text = "❌ مبلغ نامعتبر است. دوباره وارد کن:"
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb)
-        else:
-            cc.show(chat_id, text, reply_markup=kb)
+        _show(chat_id, screen_id, "❌ مبلغ نامعتبر است. دوباره وارد کن:", kb)
         bot.register_next_step_handler_by_chat_id(chat_id, wallet_amount)
         return
 
@@ -104,34 +109,49 @@ def wallet_amount(message):
     holder = get_setting("card_holder", "")
 
     if not card:
-        text = "❌ پرداخت کارت به کارت تنظیم نشده."
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb)
-        else:
-            cc.show(chat_id, text, reply_markup=kb)
+        _show(chat_id, screen_id, "❌ پرداخت کارت به کارت تنظیم نشده.", kb)
         return
 
+    pay_amount = make_unique_amount(amount)
+    if pay_amount is None:
+        _show(chat_id, screen_id, "فعلاً شلوغه، چند دقیقه دیگه دوباره تلاش کن.", kb)
+        return
+
+    user_id = internal_user_id(message.from_user.id)
+
+    # درخواست‌های در انتظارِ قبلیِ شارژ همین کاربر منقضی بشن
+    db_execute(
+        "UPDATE payments SET status='expired', updated_at=? "
+        "WHERE user_id=? AND method='wallet' AND status='awaiting'",
+        (now(), user_id)
+    )
+    db_execute("""
+    INSERT INTO payments
+    (user_id, plan_id, amount, unique_amount, method,
+     status, created_at, updated_at)
+    VALUES (?, NULL, ?, ?, 'wallet', 'awaiting', ?, ?)
+    """, (user_id, amount, pay_amount, now(), now()))
+    payment_id = db_execute(
+        "SELECT id FROM payments WHERE user_id=? AND method='wallet' "
+        "AND status='awaiting' ORDER BY id DESC LIMIT 1",
+        (user_id,), fetchone=True
+    )["id"]
+
     text = (
-        f"💳 مبلغ <b>{amount:,} تومان</b> را به کارت زیر انتقال بده:\n\n"
+        f"💳 مبلغ دقیق: <b>{pay_amount:,} تومان</b>\n"
+        "⚠️ <b>دقیقاً همین مبلغ</b> (با چند تومن آخرش) رو به کارت زیر واریز کن؛ "
+        f"خودکار تأیید میشه و <b>{amount:,} تومان</b> به کیف پولت اضافه میشه.\n\n"
         f"<code>{card}</code>\n"
         f"👤 {holder}\n\n"
-        "سپس تصویر رسید را ارسال کن."
+        "📸 اگه تا چند دقیقه تأیید نشد، تصویر رسید رو همینجا بفرست.\n"
+        "⏰ مهلت: <b>۱۵ دقیقه</b>"
     )
-    if screen_id:
-        try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-        except Exception:
-            cc.show(chat_id, text, reply_markup=kb)
-    else:
-        cc.show(chat_id, text, reply_markup=kb)
+    _show(chat_id, screen_id, text, kb)
 
-    bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount)
+    bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount, payment_id)
 
 
-def wallet_receipt(message, amount):
+def wallet_receipt(message, amount, payment_id):
     chat_id = message.chat.id
     cc.drop(message)  # عکس/پیام کاربر پاک بشه
 
@@ -139,63 +159,42 @@ def wallet_receipt(message, amount):
     kb.add(types.InlineKeyboardButton("🔙 انصراف و بازگشت", callback_data="wallet:menu"))
     screen_id = cc.get_screen(chat_id)
 
-    if not message.photo:
-        text = "❌ فقط تصویر رسید را ارسال کن."
-        if screen_id:
-            try:
-                bot.edit_message_text(text, chat_id, screen_id, reply_markup=kb)
-            except Exception:
-                cc.show(chat_id, text, reply_markup=kb)
-        else:
-            cc.show(chat_id, text, reply_markup=kb)
-        bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount)
+    payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
+    if payment and payment["status"] == "approved":
+        _show(chat_id, screen_id, "✅ شارژ کیف پولت قبلاً تأیید شده.", kb)
         return
 
-    user_id = internal_user_id(message.from_user.id)
-    file_id = message.photo[-1].file_id
+    if not message.photo:
+        _show(chat_id, screen_id, "❌ فقط تصویر رسید را ارسال کن.", kb)
+        bot.register_next_step_handler_by_chat_id(chat_id, wallet_receipt, amount, payment_id)
+        return
 
-    db_execute("""
-    INSERT INTO payments
-    (user_id, plan_id, amount, method,
-     receipt_file_id, receipt_type,
-     status, created_at, updated_at)
-    VALUES (?, NULL, ?, 'wallet', ?, 'photo',
-            'pending', ?, ?)
-    """, (
-        user_id, amount, file_id, now(), now()
-    ))
-
-    payment = db_execute("""
-    SELECT * FROM payments
-    WHERE user_id=? AND method='wallet'
-    ORDER BY id DESC LIMIT 1
-    """, (user_id,), fetchone=True)
-
-    notify_admin_payment(payment)
-
-    text = (
-        "✅ رسید شارژ کیف پول ثبت شد.\n\n"
-        "⏳ منتظر تأیید مدیریت باشید."
+    db_execute(
+        "UPDATE payments SET receipt_file_id=?, receipt_type='photo', "
+        "status='pending', updated_at=? WHERE id=? AND status='awaiting'",
+        (message.photo[-1].file_id, now(), payment_id)
     )
+
+    payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
+    if payment:
+        notify_admin_payment(payment)
+
     ok_kb = types.InlineKeyboardMarkup()
     ok_kb.add(types.InlineKeyboardButton("🔙 بازگشت به کیف پول", callback_data="wallet:menu"))
-
-    if screen_id:
-        try:
-            bot.edit_message_text(text, chat_id, screen_id, reply_markup=ok_kb)
-            return
-        except Exception:
-            pass
-    cc.show(chat_id, text, reply_markup=ok_kb)
+    _show(
+        chat_id, screen_id,
+        "✅ رسید شارژ کیف پول ثبت شد.\n\n"
+        "⏳ اگه واریز با مبلغ دقیق انجام شده باشه خودکار تأیید میشه، "
+        "وگرنه منتظر تأیید مدیریت باشید.",
+        ok_kb
+    )
 
 
 def _build_transaction_entries(user_id):
     """
     ادغام دو منبع:
     1) خریدهای کارت‌به‌کارت تأییدشده (جدول payments، method='manual')
-       که هیچ‌وقت تو transactions ثبت نمی‌شن.
-    2) تراکنش‌های کیف‌پول (شارژ، خرید با موجودی و ...) از جدول transactions.
-    بدون تکراری‌شدن، مرتب‌شده بر اساس تاریخ نزولی.
+    2) تراکنش‌های کیف‌پول (شارژ، خرید با موجودی و ...) از جدول transactions
     """
     manual_purchases = db_execute("""
     SELECT payments.*, plans.name AS plan_name
@@ -258,11 +257,10 @@ def wallet_history(call):
     else:
         text = "\n".join(["📜 <b>تراکنش‌های کیف پول</b>\n"] + [e["text"] for e in entries])
 
-    # همون پیام منوی کیف پول جای خودش این لیست رو نشون می‌ده
     try:
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        cc.show(call.message.chat.id, text, reply_markup=kb)
+        cc.show(call.message.chat.id, text, reply_markup=kb, parse_mode="HTML")
 
 
 # ============================================================
@@ -271,7 +269,7 @@ def wallet_history(call):
 
 @bot.message_handler(func=lambda m: m.text == "📜 تراکنش‌های من")
 def my_transactions(message):
-    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    cc.drop(message)
     user_id = internal_user_id(message.from_user.id)
     entries = _build_transaction_entries(user_id)
 
@@ -283,4 +281,4 @@ def my_transactions(message):
         return
 
     text = "\n".join(["📜 <b>تراکنش‌های من</b>\n"] + [e["text"] for e in entries])
-    cc.show(message.chat.id, text, reply_markup=kb)
+    cc.show(message.chat.id, text, reply_markup=kb, parse_mode="HTML")
