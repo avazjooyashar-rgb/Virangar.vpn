@@ -1,17 +1,9 @@
 # ============================================================
-# handlers_payment.py  [نسخه‌ی اصلاح‌شده]
-# پرداخت کارت به کارت، کیف پول، آنلاین، تأیید/رد توسط مدیر
-# + پنل «مدیریت پرداخت‌ها» (لیست + صفحه‌بندی) به‌جای اسپم پیام
+# handlers_payment.py  [نسخه‌ی کامل با تایید خودکار کارت‌به‌کارت]
+# پرداخت کارت به کارت (مبلغ یکتا + تایید خودکار با پیامک بانک)،
+# کیف پول، آنلاین، تأیید/رد توسط مدیر + پنل «مدیریت پرداخت‌ها»
 #
-# تغییرات این نسخه:
-#   - صفحه‌ی کارت به کارت روی همون پیام ادیت میشه و مهلت ۱۵ دقیقه‌ای
-#     برای ارسال رسید داره؛ بعد از اون دکمه‌ی «شروع دوباره» میاد
-#   - بعد از ثبت رسید، دکمه‌ی «منوی اصلی» برای کاربر هست
-#   - بعد از تأیید (کارت به کارت و کیف پول): یک پیام واحد که بالاش
-#     QR کد و پایینش لینک اشتراکه
-#   - بعد از رد پرداخت: دکمه‌ی «خرید دوباره / منوی اصلی» برای کاربر
-#
-# نیازمندی: pip install "qrcode[pil]"  (برای نمایندگی هم لازمه)
+# نیازمندی: pip install "qrcode[pil]" fastapi uvicorn
 # ============================================================
 import io
 import threading
@@ -29,6 +21,7 @@ from decorators import admin_only
 from keyboards import admin_keyboard, user_keyboard
 from datetime import datetime
 import chat_clean as cc
+from auto_confirm import make_unique_amount
 
 try:
     import qrcode
@@ -38,17 +31,16 @@ except ImportError:  # اگه نصب نبود، لینک فقط به‌صورت 
 PAGE_SIZE = 5  # تعداد پرداخت در هر صفحه لیست مدیریت
 RECEIPT_TIMEOUT_SECONDS = 15 * 60  # مهلت ارسال رسید کارت به کارت
 
-# chat_id -> {"token", "message_id", "timer", "plan_id", "username"}
+# chat_id -> {"token", "message_id", "timer", "plan_id", "username", "payment_id"}
 _receipt_wait = {}
 _wait_lock = threading.Lock()
+
+# جلوگیری از تایید هم‌زمان یک پرداخت (دکمه‌ی ادمین + تایید خودکار)
+_approve_lock = threading.Lock()
 
 
 # ============================================================
 # سازگاری با ماژول‌های دیگر (مثل handlers_wallet.py)
-# این تابع قبلاً پیام «درخواست پرداخت جدید» رو مستقیم به ادمین
-# می‌فرستاد. حالا دیگه اسپم نمی‌کنه؛ پرداخت‌ها فقط از طریق
-# پنل «مدیریت پرداخت‌ها» (دکمه‌ی 💰 پرداخت‌ها) قابل مشاهده‌ان.
-# اگه خواستی به‌جاش برات پیام بده، محتوای تابع رو برگردون.
 # ============================================================
 def notify_admin_payment(payment):
     return
@@ -155,8 +147,6 @@ def _qr_bio(link):
 def send_service_delivery(chat_id, title, plan, config):
     """
     تحویل سرویس به کاربر: یک پیام واحد که بالاش QR کد و پایینش لینک اشتراکه.
-    (عکسِ QR با کپشن؛ اگه کپشن از حد تلگرام بلندتر بشه، QR و بعدش متن جدا
-    فرستاده میشه، همچنان QR بالا و لینک پایین.)
     """
     link = config or ""
     caption = (
@@ -234,7 +224,7 @@ def _expire_receipt_wait(chat_id, token):
     kb.add(types.InlineKeyboardButton("🔄 شروع دوباره", callback_data="buy_back_home"))
     kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="go_home"))
     text = (
-        "⏰ <b>مهلت ارسال رسید تموم شد</b>\n\n"
+        "⏰ <b>مهلت پرداخت تموم شد</b>\n\n"
         "برای ادامه‌ی خرید باید مراحل رو از اول شروع کنی."
     )
     try:
@@ -249,10 +239,28 @@ def _expire_receipt_wait(chat_id, token):
             traceback.print_exc()
 
 
+def finish_receipt_screen(internal_uid):
+    """بعد از تأیید پرداخت: انتظار رسید لغو و صفحه‌ی کارت‌به‌کارت کاربر بسته میشه."""
+    user = db_execute("SELECT * FROM users WHERE id=?", (internal_uid,), fetchone=True)
+    if not user:
+        return
+    chat_id = user["telegram_id"]
+    wait = _cancel_receipt_wait(chat_id)
+    bot.clear_step_handler_by_chat_id(chat_id)
+    if wait and wait.get("message_id"):
+        try:
+            bot.edit_message_text(
+                "✅ <b>پرداخت دریافت شد.</b>", chat_id, wait["message_id"],
+                parse_mode="HTML", reply_markup=_home_kb()
+            )
+        except Exception:
+            pass
+
+
 # ============================================================
 # MANUAL PAYMENT (plan purchase) - card to card
 # ============================================================
-def _receipt_screen_text(plan, error=None):
+def _receipt_screen_text(plan, pay_amount, error=None):
     card = get_setting("card_number", "")
     holder = get_setting("card_holder", "")
     text = ""
@@ -260,11 +268,14 @@ def _receipt_screen_text(plan, error=None):
         text += f"{error}\n\n"
     text += (
         "💳 <b>پرداخت کارت به کارت</b>\n\n"
-        f"💰 مبلغ: <b>{plan['price']:,} تومان</b>\n\n"
+        f"💰 مبلغ دقیق: <b>{pay_amount:,} تومان</b>\n"
+        "⚠️ <b>دقیقاً همین مبلغ</b> رو واریز کن (با همین چند تومن آخر) "
+        "تا پرداخت خودکار تأیید بشه.\n\n"
         f"💳 شماره کارت:\n<code>{card}</code>\n\n"
         f"👤 به نام: <b>{holder or '---'}</b>\n\n"
-        "📸 بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید.\n"
-        "⏰ مهلت ارسال رسید: <b>۱۵ دقیقه</b>"
+        "✅ بعد از واریز، تأیید خودکار انجام میشه.\n"
+        "📸 اگه تا چند دقیقه تأیید نشد، تصویر رسید رو همینجا بفرست.\n"
+        "⏰ مهلت: <b>۱۵ دقیقه</b>"
     )
     return text
 
@@ -298,17 +309,47 @@ def manual_payment(call):
         )
         return
 
-    bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
+
+    # مبلغ یکتا
+    pay_amount = make_unique_amount(plan["price"])
+    if pay_amount is None:
+        bot.answer_callback_query(
+            call.id, "فعلاً شلوغه، چند دقیقه دیگه دوباره تلاش کن.", show_alert=True
+        )
+        return
+
+    bot.answer_callback_query(call.id)
 
     # هر انتظار قبلی (اگه بود) لغو بشه
     _cancel_receipt_wait(chat_id)
     bot.clear_step_handler_by_chat_id(chat_id)
 
+    # پرداخت‌های در انتظارِ قبلیِ همین کاربر منقضی بشن، بعد پرداخت جدید ثبت میشه
+    user_id = internal_user_id(call.from_user.id)
+    db_execute(
+        "UPDATE payments SET status='expired', updated_at=? "
+        "WHERE user_id=? AND status='awaiting'",
+        (now(), user_id)
+    )
+    db_execute("""
+    INSERT INTO payments
+    (user_id, plan_id, amount, unique_amount, method,
+     custom_username, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'manual', ?, 'awaiting', ?, ?)
+    """, (
+        user_id, plan_id, plan["price"], pay_amount, username, now(), now()
+    ))
+    payment_id = db_execute(
+        "SELECT id FROM payments WHERE user_id=? AND status='awaiting' "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id,), fetchone=True
+    )["id"]
+
     # همون پیام روش پرداخت به صفحه‌ی کارت به کارت تبدیل میشه
     message_id = _edit(
         chat_id, call.message.message_id,
-        _receipt_screen_text(plan), _receipt_cancel_kb()
+        _receipt_screen_text(plan, pay_amount), _receipt_cancel_kb()
     )
 
     token = uuid.uuid4().hex
@@ -323,11 +364,12 @@ def manual_payment(call):
             "timer": timer,
             "plan_id": plan_id,
             "username": username,
+            "payment_id": payment_id,
         }
     timer.start()
 
     bot.register_next_step_handler_by_chat_id(
-        chat_id, receive_plan_receipt, plan_id, username
+        chat_id, receive_plan_receipt, plan_id, username, payment_id
     )
 
 
@@ -338,6 +380,14 @@ def payment_cancel(call):
     chat_id = call.message.chat.id
     wait = _cancel_receipt_wait(chat_id)
     bot.clear_step_handler_by_chat_id(chat_id)
+
+    # مبلغ یکتای این صفحه آزاد بشه
+    if wait and wait.get("payment_id"):
+        db_execute(
+            "UPDATE payments SET status='expired', updated_at=? "
+            "WHERE id=? AND status='awaiting'",
+            (now(), wait["payment_id"])
+        )
 
     from handlers_shop import show_payment_methods, show_panels
 
@@ -356,52 +406,52 @@ def payment_cancel(call):
         show_panels(chat_id, call.message.message_id)
 
 
-def receive_plan_receipt(message, plan_id, username):
+def receive_plan_receipt(message, plan_id, username, payment_id):
     chat_id = message.chat.id
     cc.drop(message)  # عکس/پیام کاربر از چت پاک بشه (file_id معتبر می‌مونه)
 
     wait = _receipt_wait.get(chat_id)
     screen_id = wait["message_id"] if wait else cc.get_screen(chat_id)
 
+    payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
     plan = db_execute("SELECT * FROM plans WHERE id=?", (plan_id,), fetchone=True)
-    if not plan:
+    if not payment or not plan:
         _cancel_receipt_wait(chat_id)
-        _edit(chat_id, screen_id, "❌ این پلن دیگر موجود نیست.", _home_kb())
+        _edit(chat_id, screen_id, "❌ این سفارش دیگر معتبر نیست.", _home_kb())
+        return
+
+    if payment["status"] == "approved":
+        _cancel_receipt_wait(chat_id)
+        _edit(chat_id, screen_id, "✅ پرداختت قبلاً تأیید شده.", _home_kb())
         return
 
     if not message.photo:
         _edit(
             chat_id, screen_id,
-            _receipt_screen_text(plan, error="❌ <b>لطفاً تصویر رسید را ارسال کن.</b>"),
+            _receipt_screen_text(
+                plan, payment["unique_amount"] or payment["amount"],
+                error="❌ <b>لطفاً تصویر رسید را ارسال کن.</b>"
+            ),
             _receipt_cancel_kb()
         )
         bot.register_next_step_handler_by_chat_id(
-            chat_id, receive_plan_receipt, plan_id, username
+            chat_id, receive_plan_receipt, plan_id, username, payment_id
         )
         return
 
     # رسید رسید؛ تایمر لغو بشه
     _cancel_receipt_wait(chat_id)
 
-    file_id = message.photo[-1].file_id
-    user_id = internal_user_id(message.from_user.id)
-    db_execute("""
-    INSERT INTO payments
-    (user_id, plan_id, amount, method,
-     receipt_file_id, receipt_type,
-     custom_username,
-     status, created_at, updated_at)
-    VALUES (?, ?, ?, 'manual', ?, 'photo',
-            ?, 'pending', ?, ?)
-    """, (
-        user_id, plan_id, plan["price"], file_id, username, now(), now()
-    ))
-    # دیگه پیام خودکار به ادمین ارسال نمی‌شود؛ فقط در دیتابیس pending می‌ماند
-    # و از طریق «مدیریت پرداخت‌ها» قابل مشاهده و بررسی است.
+    db_execute(
+        "UPDATE payments SET receipt_file_id=?, receipt_type='photo', "
+        "status='pending', updated_at=? WHERE id=? AND status='awaiting'",
+        (message.photo[-1].file_id, now(), payment_id)
+    )
     _edit(
         chat_id, screen_id,
         "✅ <b>رسید شما ثبت شد.</b>\n\n"
-        "⏳ پرداخت در انتظار بررسی مدیریت است. بعد از تأیید، سرویس برات ارسال میشه.",
+        "⏳ اگه واریز با مبلغ دقیق انجام شده باشه خودکار تأیید میشه، "
+        "وگرنه مدیریت بررسی می‌کنه.",
         _home_kb()
     )
 
@@ -457,7 +507,6 @@ def wallet_payment(call):
     )
 
     if not result["success"]:
-        # صفحه‌ی روش پرداخت می‌مونه (کاربر بتونه دوباره تلاش کنه)، پیام خطا کنارش میاد
         cc.show(
             call.message.chat.id,
             "❌ ساخت سرویس ناموفق بود. لطفاً بعداً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.\n\n"
@@ -465,8 +514,6 @@ def wallet_payment(call):
             key="err",
             parse_mode="HTML"
         )
-        # این یک خطای فنی (نه یک پرداخت جدید در انتظار) است، همچنان به‌صورت
-        # مستقیم به سوپرادمین اطلاع داده می‌شود چون نیاز به رسیدگی فوری دارد.
         bot.send_message(
             SUPER_ADMIN_ID,
             "⚠️ پرداخت کیف‌پولی ناموفق بود چون ساخت سرویس PasarGuard خطا داد.\n\n"
@@ -498,8 +545,6 @@ def wallet_payment(call):
         user["id"], plan_id, plan["price"], username, service["id"], now(), now()
     ))
 
-    # صفحه‌ی روش پرداخت پاک میشه؛ پیام تحویل سرویس (QR + لینک اشتراک)
-    # عمداً ثبت/پاک نمیشه تا کاربر لینکش رو از دست نده.
     cc.drop_screen(call.message.chat.id)
     cc.safe_delete(call.message.chat.id, call.message.message_id)
     send_service_delivery(
@@ -512,9 +557,6 @@ def wallet_payment(call):
 
 # ============================================================
 # PAYMENT MANAGEMENT PANEL (فیلتر تب‌دار + صفحه‌بندی + آمار)
-# ورودی به این پنل از منوی سوپرادمین:
-#   types.InlineKeyboardButton("💳 پرداخت‌ها", callback_data="paymgmt:pending:0")
-# (اگه دکمه‌ی فعلی منوت callback_data یا متن دیگه‌ای داره، بگو تا وصلش کنم)
 # ============================================================
 STATUS_TABS = [
     ("pending", "🟡 در انتظار"),
@@ -525,7 +567,10 @@ STATUS_TABS = [
 
 
 def _payment_row_label(payment):
-    status_icon = {"pending": "🟡", "approved": "✅", "rejected": "❌"}.get(payment["status"], "▫️")
+    status_icon = {
+        "pending": "🟡", "approved": "✅", "rejected": "❌",
+        "awaiting": "⏳", "expired": "⌛"
+    }.get(payment["status"], "▫️")
     user = db_execute("SELECT * FROM users WHERE id=?", (payment["user_id"],), fetchone=True)
     uname = f"@{user['username']}" if user and user["username"] else (user["telegram_id"] if user else "?")
     when = _relative_time(payment["created_at"])
@@ -572,7 +617,6 @@ def _build_payment_list_keyboard(status, page):
 
     kb = types.InlineKeyboardMarkup()
 
-    # تب‌های فیلتر
     tab_buttons = []
     for tab_key, tab_label in STATUS_TABS:
         label = f"• {tab_label} •" if tab_key == status else tab_label
@@ -598,7 +642,6 @@ def _build_payment_list_keyboard(status, page):
 
 
 def _render_payment_panel_text(status, page):
-    """ساخت متن+کیبورد پنل مدیریت پرداخت. مشترک بین ورودی دکمه و pagination."""
     kb, total, rows = _build_payment_list_keyboard(status, page)
 
     today_total, today_cnt, pending_cnt = _today_summary()
@@ -619,14 +662,12 @@ def _render_payment_panel_text(status, page):
     return text, kb
 
 
-# نقطه ورود از منوی سوپرادمین: دکمه‌ی reply-keyboard «💰 پرداخت‌ها»
 @bot.message_handler(func=lambda m: m.text == "💰 پرداخت‌ها")
 @admin_only
 def open_payment_management(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
-    cc.drop(message)  # پیام دکمه‌ی منو پاک بشه
+    cc.drop(message)
     text, kb = _render_payment_panel_text("pending", 0)
-    # صفحه‌ی قبلی ادمین (منوی مدیریت یا هر بخش دیگه) پاک میشه
     cc.show(message.chat.id, text, key="admin_menu", reply_markup=kb, parse_mode="HTML")
 
 
@@ -635,7 +676,6 @@ def payment_management_back(call):
     if not is_superadmin(call.from_user.id):
         bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
         return
-    # اگه این پیام همون صفحه‌ی فعلیه پایین با نمایش منو پاک میشه، وگرنه فقط دکمه‌هاش برداشته میشه
     if not cc.is_screen(call.message.chat.id, call.message.message_id, "admin_menu"):
         try:
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
@@ -660,7 +700,6 @@ def payment_management_panel(call):
     page = int(page)
     text, kb = _render_payment_panel_text(status, page)
 
-    # با برگشت به لیست، عکس رسیدِ صفحه‌ی جزئیات پاک میشه
     cc.drop_screen(call.message.chat.id, "admin_receipt")
 
     try:
@@ -736,6 +775,10 @@ def payment_detail(call):
     else:
         plan_line = f"📦 پلن: {plan['name'] if plan else '---'}\n"
 
+    unique_line = ""
+    if "unique_amount" in payment.keys() and payment["unique_amount"]:
+        unique_line = f"🎯 مبلغ یکتای واریزی: {payment['unique_amount']:,} تومان\n"
+
     text = (
         "💳 <b>جزئیات پرداخت</b>\n\n"
         f"🆔 Payment: <code>{payment['id']}</code>\n"
@@ -743,10 +786,12 @@ def payment_detail(call):
         f"👤 کاربر: {username}\n"
         f"🆔 Telegram ID: <code>{user['telegram_id'] if user else '---'}</code>\n"
         f"💰 مبلغ: {payment['amount']:,} تومان\n"
+        f"{unique_line}"
         f"{plan_line}"
         f"{extra_line}"
         f"🏷 نام سرویس: {custom_username or '---'}\n"
         f"📌 روش: {payment['method']}\n"
+        f"📍 وضعیت: {payment['status']}\n"
         f"🕒 {_relative_time(payment['created_at'])}\n\n"
         f"{trust_line}"
     )
@@ -761,7 +806,6 @@ def payment_detail(call):
         )
     kb.add(types.InlineKeyboardButton("⬅️ بازگشت به لیست", callback_data=f"paymgmt:{status}:{page}"))
 
-    # عکس رسیدِ جزئیات قبلی (اگه بود) پاک بشه، فقط رسید همین پرداخت بمونه
     cc.drop_screen(call.message.chat.id, "admin_receipt")
     if payment["receipt_file_id"]:
         try:
@@ -785,8 +829,108 @@ def payment_detail(call):
 
 
 # ============================================================
-# APPROVE
+# APPROVE  (هسته‌ی مشترک: دکمه‌ی ادمین + تایید خودکار با پیامک)
 # ============================================================
+def approve_payment_core(payment_id):
+    """
+    پرداخت رو تأیید و اعمال می‌کنه. خروجی: (ok, info)
+    فقط برای پرداخت‌های pending یا awaiting کار می‌کنه و با قفل از
+    تایید دوباره جلوگیری می‌کنه.
+    """
+    with _approve_lock:
+        payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
+        if not payment or payment["status"] not in ("pending", "awaiting"):
+            return False, "این پرداخت قبلاً بررسی شده."
+
+        payment_type = payment["type"] if "type" in payment.keys() else "purchase"
+
+        # تمدید سرویس / افزایش حجم
+        if payment_type in ("renew", "increase"):
+            from handlers_renewal import apply_manual_renew_or_increase
+            ok, info = apply_manual_renew_or_increase(payment)
+            if not ok:
+                return False, info
+            db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
+            return True, "ok"
+
+        # شارژ استخر حجم نمایندگی
+        if payment_type == "reseller":
+            from handlers_reseller import apply_reseller_topup
+            ok, info = apply_reseller_topup(payment)
+            if not ok:
+                return False, info
+            db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
+            return True, "ok"
+
+        user = db_execute("SELECT * FROM users WHERE id=?", (payment["user_id"],), fetchone=True)
+
+        # شارژ کیف پول (فقط مبلغ پایه، نه مبلغ یکتا)
+        if payment["method"] == "wallet":
+            db_execute("UPDATE users SET balance=balance+? WHERE id=?", (payment["amount"], payment["user_id"]))
+            db_execute("""
+            INSERT INTO transactions
+            (user_id, amount, type, description, reference, created_at)
+            VALUES (?, ?, 'credit', ?, ?, ?)
+            """, (
+                payment["user_id"], payment["amount"], "شارژ کیف پول",
+                f"payment:{payment_id}", now()
+            ))
+            db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
+            if user:
+                bot.send_message(
+                    user["telegram_id"],
+                    f"✅  پرداخت تأیید شد.\n\n"
+                    f"💰 مبلغ <b>{payment['amount']:,}</b> تومان "
+                    f"به کیف پول شما اضافه شد.",
+                    parse_mode="HTML",
+                    reply_markup=_home_kb()
+                )
+            return True, "ok"
+
+        # سرویس VPN
+        plan = db_execute("SELECT * FROM plans WHERE id=?", (payment["plan_id"],), fetchone=True)
+        if not plan or not user:
+            return False, "اطلاعات پرداخت ناقص است."
+        panel = None
+        if plan["panel_id"]:
+            panel = db_execute("SELECT * FROM panels WHERE id=? AND active=1", (plan["panel_id"],), fetchone=True)
+        if not panel:
+            panel = db_execute("""
+            SELECT * FROM panels
+            WHERE active=1
+            ORDER BY assigned_sales ASC, id ASC
+            LIMIT 1
+            """, fetchone=True)
+        if not panel:
+            return False, "هیچ پنل فعالی برای ساخت سرویس وجود ندارد."
+
+        custom_username = payment["custom_username"] if "custom_username" in payment.keys() else None
+
+        result = pasarguard_create_service(
+            panel=panel,
+            telegram_user=user,
+            plan=plan,
+            desired_username=custom_username
+        )
+        if not result["success"]:
+            return False, f"ساخت سرویس PasarGuard ناموفق بود: {result['error']}"
+
+        service = create_local_service(user=user, plan=plan, panel=panel, result=result)
+        db_execute("""
+        UPDATE payments
+        SET status='approved', service_id=?, updated_at=?
+        WHERE id=?
+        """, (service["id"], now(), payment_id))
+
+        send_service_delivery(
+            user["telegram_id"],
+            "🎉 <b>پرداخت شما تأیید شد!</b>",
+            plan,
+            service["config"]
+        )
+        return True, "ok"
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payapprove:"))
 def approve_payment(call):
     if not is_superadmin(call.from_user.id):
@@ -798,114 +942,21 @@ def approve_payment(call):
     status = parts[2] if len(parts) > 2 else "pending"
     page = parts[3] if len(parts) > 3 else "0"
 
-    payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
-    if not payment or payment["status"] != "pending":
-        bot.answer_callback_query(call.id, "این پرداخت قبلاً بررسی شده.", show_alert=True)
-        return
-
-    # تمدید سرویس / افزایش حجم (کارت به کارت که نیاز به تأیید دستی دارن)
-    payment_type = payment["type"] if "type" in payment.keys() else "purchase"
-    if payment_type in ("renew", "increase"):
-        from handlers_renewal import apply_manual_renew_or_increase
-        ok, info = apply_manual_renew_or_increase(payment)
-        if not ok:
-            bot.answer_callback_query(call.id, f"خطا: {info}", show_alert=True)
-            return
-        db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
-        bot.answer_callback_query(call.id, "✅ تأیید و اعمال شد.")
-        payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
-        return
-
-    # شارژ استخر حجم نمایندگی (کارت به کارت، نیاز به تأیید دستی)
-    if payment_type == "reseller":
-        from handlers_reseller import apply_reseller_topup
-        ok, info = apply_reseller_topup(payment)
-        if not ok:
-            bot.answer_callback_query(call.id, f"خطا: {info}", show_alert=True)
-            return
-        db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
-        bot.answer_callback_query(call.id, "✅ تأیید شد و حجم به استخر نماینده اضافه شد.")
-        payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
-        return
-
-    # Wallet topup
-    if payment["method"] == "wallet":
-        user = db_execute("SELECT * FROM users WHERE id=?", (payment["user_id"],), fetchone=True)
-        db_execute("UPDATE users SET balance=balance+? WHERE id=?", (payment["amount"], payment["user_id"]))
-        db_execute("""
-        INSERT INTO transactions
-        (user_id, amount, type, description, reference, created_at)
-        VALUES (?, ?, 'credit', ?, ?, ?)
-        """, (
-            payment["user_id"], payment["amount"], "شارژ کیف پول",
-            f"payment:{payment_id}", now()
-        ))
-        db_execute("UPDATE payments SET status='approved', updated_at=? WHERE id=?", (now(), payment_id))
-        if user:
+    ok, info = approve_payment_core(payment_id)
+    if not ok:
+        bot.answer_callback_query(call.id, f"خطا: {info}", show_alert=True)
+        if "ساخت سرویس" in str(info):
             bot.send_message(
-                user["telegram_id"],
-                f"✅  پرداخت تأیید شد.\n\n"
-                f"💰 مبلغ <b>{payment['amount']:,}</b> تومان "
-                f"به کیف پول شما اضافه شد.",
-                parse_mode="HTML",
-                reply_markup=_home_kb()
+                SUPER_ADMIN_ID,
+                "⚠️ پرداخت تأیید نشد چون ساخت سرویس موفق نبود.\n\n"
+                f"Payment: {payment_id}\nخطا: {info}"
             )
-        bot.answer_callback_query(call.id, "کیف پول شارژ شد ✅ ")
-        payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
         return
 
-    # VPN service (manual/card payment)
-    plan = db_execute("SELECT * FROM plans WHERE id=?", (payment["plan_id"],), fetchone=True)
-    user = db_execute("SELECT * FROM users WHERE id=?", (payment["user_id"],), fetchone=True)
-    if not plan or not user:
-        bot.answer_callback_query(call.id, "اطلاعات پرداخت ناقص است.", show_alert=True)
-        return
-    panel = None
-    if plan["panel_id"]:
-        panel = db_execute("SELECT * FROM panels WHERE id=? AND active=1", (plan["panel_id"],), fetchone=True)
-    if not panel:
-        panel = db_execute("""
-        SELECT * FROM panels
-        WHERE active=1
-        ORDER BY assigned_sales ASC, id ASC
-        LIMIT 1
-        """, fetchone=True)
-    if not panel:
-        bot.answer_callback_query(call.id, "هیچ پنل فعالی برای ساخت سرویس وجود ندارد.", show_alert=True)
-        return
-
-    custom_username = payment["custom_username"] if "custom_username" in payment.keys() else None
-
-    result = pasarguard_create_service(
-        panel=panel,
-        telegram_user=user,
-        plan=plan,
-        desired_username=custom_username
-    )
-    if not result["success"]:
-        bot.answer_callback_query(call.id, "ساخت سرویس انجام نشد.", show_alert=True)
-        bot.send_message(
-            SUPER_ADMIN_ID,
-            "⚠️ پرداخت تأیید نشد چون ساخت سرویس PasarGuard موفق نبود.\n\n"
-            f"Payment: {payment_id}\n"
-            f"خطا: {result['error']}"
-        )
-        return
-    service = create_local_service(user=user, plan=plan, panel=panel, result=result)
-    db_execute("""
-    UPDATE payments
-    SET status='approved', service_id=?, updated_at=?
-    WHERE id=?
-    """, (service["id"], now(), payment_id))
-
-    # تحویل سرویس: یک پیام واحد (QR بالا، لینک اشتراک پایین) + دکمه‌ی منوی اصلی
-    send_service_delivery(
-        user["telegram_id"],
-        "🎉 <b>پرداخت شما تأیید شد!</b>",
-        plan,
-        service["config"]
-    )
-    bot.answer_callback_query(call.id, "پرداخت و سرویس تأیید شد ✅")
+    row = db_execute("SELECT user_id FROM payments WHERE id=?", (payment_id,), fetchone=True)
+    if row:
+        finish_receipt_screen(row["user_id"])
+    bot.answer_callback_query(call.id, "✅ تأیید شد.")
     payment_management_panel(_fake_call(call, f"paymgmt:{status}:{page}"))
 
 
@@ -934,11 +985,13 @@ def reject_payment(call):
     status = parts[2] if len(parts) > 2 else "pending"
     page = parts[3] if len(parts) > 3 else "0"
 
-    payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
-    if not payment or payment["status"] != "pending":
-        bot.answer_callback_query(call.id, "این پرداخت قبلاً بررسی شده.", show_alert=True)
-        return
-    db_execute("UPDATE payments SET status='rejected', updated_at=? WHERE id=?", (now(), payment_id))
+    with _approve_lock:
+        payment = db_execute("SELECT * FROM payments WHERE id=?", (payment_id,), fetchone=True)
+        if not payment or payment["status"] != "pending":
+            bot.answer_callback_query(call.id, "این پرداخت قبلاً بررسی شده.", show_alert=True)
+            return
+        db_execute("UPDATE payments SET status='rejected', updated_at=? WHERE id=?", (now(), payment_id))
+
     user = db_execute("SELECT * FROM users WHERE id=?", (payment["user_id"],), fetchone=True)
     if user:
         bot.send_message(
@@ -967,7 +1020,6 @@ def online_payment(call):
     if not provider:
         bot.answer_callback_query(call.id, "درگاه پرداخت تنظیم نشده.", show_alert=True)
         return
-    # صفحه‌ی روش پرداخت می‌مونه، این پیام موقتی کنارش میاد
     cc.show(
         call.message.chat.id,
         "🌐 درگاه آنلاین فعال است، اما اتصال نهایی "
