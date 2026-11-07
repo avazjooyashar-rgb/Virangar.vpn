@@ -51,6 +51,21 @@ def _normalize_url(url):
     return url
 
 
+def _full_sub_url(panel, sub):
+    """
+    اگر پنل فقط مسیر نسبی ساب (مثل /sub/xxxx) برگردانده باشد
+    (چون XRAY_SUBSCRIPTION_URL_PREFIX روی پنل تنظیم نشده)،
+    آدرس پنل را جلوش می‌چسباند تا لینک کامل شود.
+    اگر لینک از قبل کامل باشد، دست نمی‌خورد.
+    """
+    sub = (sub or "").strip()
+    if not sub:
+        return ""
+    if sub.startswith(("http://", "https://")):
+        return sub
+    return _normalize_url(panel["url"]) + "/" + sub.lstrip("/")
+
+
 def _panel_credentials_ok(panel):
     return bool(
         (panel.get("url") or "").strip()
@@ -152,7 +167,7 @@ async def _create_service_async(panel, telegram_user, plan, desired_username=Non
             "success": True,
             "error": "",
             "username": user.username,
-            "config": getattr(user, "subscription_url", "") or "",
+            "config": _full_sub_url(panel, getattr(user, "subscription_url", "")),
             "qr": "",
         }
 
@@ -197,7 +212,7 @@ async def _create_unlimited_service_async(panel, note, desired_username=None):
             "success": True,
             "error": "",
             "username": user.username,
-            "config": getattr(user, "subscription_url", "") or "",
+            "config": _full_sub_url(panel, getattr(user, "subscription_url", "")),
             "qr": "",
         }
 
